@@ -1,7 +1,7 @@
 # TDLib for Android
 
-[![TDLib](https://img.shields.io/badge/TDLib-1.8.58-orange.svg)](https://github.com/tdlib/td)
 [![](https://jitpack.io/v/fazilus/tdlib-android.svg)](https://jitpack.io/#fazilus/tdlib-android)
+[![TDLib](https://img.shields.io/badge/TDLib-1.8.58-orange.svg)](https://github.com/tdlib/td)
 [![License](https://img.shields.io/badge/License-BSL--1.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Java%20%7C%20Kotlin-purple.svg)](https://kotlinlang.org)
@@ -19,7 +19,7 @@ Why do you need this library if you can build TDLib yourself? The answer is quit
 - **Android Studio** will no longer mark all accesses to TDLib as "errors", because now it sees its code.
 
 If you are still interested in building the library from scratch, refer to these guides:\
-[Official build instructions](https://github.com/tdlib/td/tree/master/example/android) or [My more detailed build instructions](BUILD.md)
+[Official build instructions](https://github.com/tdlib/td/tree/master/example/android) or [My more detailed build instructions](https://github.com/fazilus/tdlib-android/blob/main/BUILD.MD) 
 
 ## Installation
 
@@ -30,14 +30,6 @@ If you are still interested in building the library from scratch, refer to these
 In your `settings.gradle.kts` (project root):
 
 ```kotlin
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-
 dependencyResolutionManagement {
     repositories {
         google()
@@ -88,14 +80,6 @@ Click **File → Sync Project with Gradle Files** in Android Studio.
 In your `settings.gradle` (project root):
 
 ```groovy
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-
 dependencyResolutionManagement {
     repositories {
         google()
@@ -292,4 +276,4 @@ DEALINGS IN THE SOFTWARE.
 
 ## Feedback
 
-If you encounter any issues with a library, please create an [Issue](https://github.com/fazilus/TDLib-Android/issues) in this repository.
+If you encounter any issues with a library, please create an [Issue](https://github.com/fazilus/tdlib-android/issues) in this repository.
