@@ -1,7 +1,7 @@
 # TDLib for Android
 
 [![](https://jitpack.io/v/fazilus/tdlib-android.svg)](https://jitpack.io/#fazilus/tdlib-android)
-[![TDLib](https://img.shields.io/badge/TDLib-1.8.60-orange.svg)](https://github.com/tdlib/td)
+[![TDLib](https://img.shields.io/badge/TDLib-1.8.61-orange.svg)](https://github.com/tdlib/td)
 [![License](https://img.shields.io/badge/License-BSL--1.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Android-green.svg)](https://developer.android.com)
 [![Language](https://img.shields.io/badge/Language-Java%20%7C%20Kotlin-purple.svg)](https://kotlinlang.org)
@@ -43,7 +43,7 @@ In your `build.gradle.kts` (:app):
 
 ```kotlin
 dependencies {
-    implementation("com.github.fazilus:tdlib-android:1.8.60")
+    implementation("com.github.fazilus:tdlib-android:1.8.61")
 }
 ```
 
@@ -58,7 +58,7 @@ and in `libs.version.toml`:
 
 ```kotlin
 [versions]
-tdlib = "1.8.60"
+tdlib = "1.8.61"
 
 [libraries]
 # Core
@@ -105,7 +105,7 @@ In your `app/build.gradle`:
 
 ```groovy
 dependencies {
-    implementation 'com.github.fazilus:tdlib-android:1.8.60'
+    implementation 'com.github.fazilus:tdlib-android:1.8.61'
 }
 ```
 

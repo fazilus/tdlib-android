@@ -52,7 +52,7 @@ afterEvaluate {
 
                 groupId = "com.github.fazilus"
                 artifactId = "tdlib-android"
-                version = "1.8.58"
+                version = "1.8.61"
             }
         }
     }
