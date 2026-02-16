@@ -2,6 +2,22 @@ name: Build TDLib JNI (Windows/Linux/Android)
 
 on:
   workflow_dispatch:
+    inputs:
+      build_windows:
+        description: "Build Windows x64 artifact"
+        required: true
+        default: true
+        type: boolean
+      build_linux:
+        description: "Build Linux x64 artifact"
+        required: true
+        default: true
+        type: boolean
+      build_android:
+        description: "Build Android artifacts"
+        required: true
+        default: false
+        type: boolean
 
 jobs:
   get-commit:
@@ -22,6 +38,7 @@ jobs:
   build-windows:
     needs: get-commit
     runs-on: windows-2022
+    if: ${{ inputs.build_windows }}
 
     steps:
       - name: Checkout TDLib
@@ -48,17 +65,43 @@ jobs:
           vcpkg install gperf:x64-windows openssl:x64-windows zlib:x64-windows
 
       - name: Configure CMake (TDLib + JNI)
+        shell: pwsh
         run: |
+          $TdInstall = (Resolve-Path "./example/java").Path + "/td"
           cmake -S . -B build -A x64 `
             -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DTD_ENABLE_JNI=ON `
-            -DCMAKE_INSTALL_PREFIX:PATH=./tdlib-install
+            -DCMAKE_INSTALL_PREFIX:PATH=$TdInstall
 
       - name: Build TDLib (Release)
         run: |
           cmake --build build --config Release --parallel 4
           cmake --install build --config Release
+
+      - name: Configure Java JNI wrapper build
+        shell: pwsh
+        run: |
+          $TdInstall = (Resolve-Path "./example/java/td").Path
+          $JavaInstall = (Resolve-Path "./example/java").Path
+          cmake -S example/java -B example/java/build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DTd_DIR="$TdInstall/lib/cmake/Td" `
+            -DCMAKE_INSTALL_PREFIX:PATH=$JavaInstall
+
+      - name: Build Java JNI wrapper (tdjni)
+        run: |
+          cmake --build example/java/build --config Release --parallel 4
+          cmake --install example/java/build --config Release
+
+      - name: Debug JNI output
+        shell: pwsh
+        run: |
+          Write-Host "=== example/java tree ==="
+          Get-ChildItem -Recurse -File example/java | Where-Object {
+            $_.Name -match 'tdjni|tdjson|libssl|libcrypto|zlib1'
+          } | Select-Object FullName
 
       - name: Collect package
         shell: pwsh
@@ -68,15 +111,16 @@ jobs:
           New-Item -ItemType Directory -Path tdlib-package/lib -Force | Out-Null
           New-Item -ItemType Directory -Path tdlib-package/include -Force | Out-Null
 
-          if (Test-Path 'tdlib-install/include') { Copy-Item -Recurse -Force 'tdlib-install/include/*' 'tdlib-package/include/' }
-          if (Test-Path 'tdlib-install/lib') { Copy-Item -Recurse -Force 'tdlib-install/lib/*' 'tdlib-package/lib/' }
-          if (Test-Path 'tdlib-install/bin') { Copy-Item -Recurse -Force 'tdlib-install/bin/*' 'tdlib-package/bin/' }
+          if (Test-Path 'example/java/td/include') { Copy-Item -Recurse -Force 'example/java/td/include/*' 'tdlib-package/include/' }
+          if (Test-Path 'example/java/td/lib') { Copy-Item -Recurse -Force 'example/java/td/lib/*' 'tdlib-package/lib/' }
+          if (Test-Path 'example/java/td/bin') { Copy-Item -Recurse -Force 'example/java/td/bin/*' 'tdlib-package/bin/' }
+          if (Test-Path 'example/java/bin') { Copy-Item -Recurse -Force 'example/java/bin/*' 'tdlib-package/bin/' }
 
-          $tdjni = Get-ChildItem -Recurse -File -Filter 'tdjni.dll' | Select-Object -First 1
+          $tdjni = Get-ChildItem -Recurse -File -Path "example/java" -Filter 'tdjni.dll' | Select-Object -First 1
           if (-not $tdjni) { throw 'tdjni.dll was not produced' }
           Copy-Item -Force $tdjni.FullName 'tdlib-package/bin/tdjni.dll'
 
-          $tdjson = Get-ChildItem -Recurse -File -Filter 'tdjson.dll' | Select-Object -First 1
+          $tdjson = Get-ChildItem -Recurse -File -Path "example/java/td" -Filter 'tdjson.dll' | Select-Object -First 1
           if (-not $tdjson) { throw 'tdjson.dll was not produced' }
           Copy-Item -Force $tdjson.FullName 'tdlib-package/bin/tdjson.dll'
 
@@ -101,6 +145,7 @@ jobs:
   build-linux:
     needs: get-commit
     runs-on: ubuntu-22.04
+    if: ${{ inputs.build_linux }}
 
     steps:
       - name: Checkout TDLib
@@ -129,25 +174,46 @@ jobs:
 
       - name: Configure CMake (TDLib + JNI)
         run: |
+          TD_INSTALL_DIR="$(pwd)/example/java/td"
           cmake -S . -B build -GNinja \
             -DCMAKE_BUILD_TYPE=Release \
             -DTD_ENABLE_JNI=ON \
-            -DCMAKE_INSTALL_PREFIX=./tdlib-install
+            -DCMAKE_INSTALL_PREFIX="$TD_INSTALL_DIR"
 
       - name: Build TDLib (Release)
         run: |
           cmake --build build --parallel
           cmake --install build
 
+      - name: Configure Java JNI wrapper build
+        run: |
+          TD_INSTALL_DIR="$(pwd)/example/java/td"
+          JAVA_INSTALL_DIR="$(pwd)/example/java"
+          cmake -S example/java -B example/java/build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTd_DIR="$TD_INSTALL_DIR/lib/cmake/Td" \
+            -DCMAKE_INSTALL_PREFIX="$JAVA_INSTALL_DIR"
+
+      - name: Build Java JNI wrapper (tdjni)
+        run: |
+          cmake --build example/java/build --parallel
+          cmake --install example/java/build
+
+      - name: Debug JNI output
+        run: |
+          set -euxo pipefail
+          echo "=== example/java tree ==="
+          find example/java -type f | grep -E 'tdjni|tdjson|libssl|libcrypto|zlib' || true
+
       - name: Collect package
         run: |
           set -euxo pipefail
           mkdir -p tdlib-package/lib tdlib-package/include
-          [ -d tdlib-install/include ] && cp -r tdlib-install/include/. tdlib-package/include/ || true
-          [ -d tdlib-install/lib ] && cp -r tdlib-install/lib/. tdlib-package/lib/ || true
+          [ -d example/java/td/include ] && cp -r example/java/td/include/. tdlib-package/include/ || true
+          [ -d example/java/td/lib ] && cp -r example/java/td/lib/. tdlib-package/lib/ || true
 
-          TDJNI_PATH=$(find . -type f -name 'libtdjni.so' | head -n1 || true)
-          TDJSON_PATH=$(find . -type f -name 'libtdjson.so' | head -n1 || true)
+          TDJNI_PATH=$(find example/java -type f -name 'libtdjni.so' | head -n1 || true)
+          TDJSON_PATH=$(find example/java/td -type f -name 'libtdjson.so' | head -n1 || true)
           if [ -z "$TDJNI_PATH" ]; then echo 'libtdjni.so was not produced' && exit 1; fi
           if [ -z "$TDJSON_PATH" ]; then echo 'libtdjson.so was not produced' && exit 1; fi
           cp "$TDJNI_PATH" tdlib-package/lib/libtdjni.so
@@ -169,6 +235,7 @@ jobs:
   build-android:
     needs: get-commit
     runs-on: ubuntu-22.04
+    if: ${{ inputs.build_android }}
 
     steps:
       - name: Checkout TDLib
