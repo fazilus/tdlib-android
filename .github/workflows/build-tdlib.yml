@@ -1,290 +1,410 @@
-name: Build TDLib JNI (Windows/Linux/Android)
+name: Build TDLib JNI
 
 on:
   workflow_dispatch:
     inputs:
       build_windows:
-        description: "Build Windows x64 artifact"
+        description: 'Build for Windows x64'
         required: true
-        default: true
         type: boolean
+        default: true
       build_linux:
-        description: "Build Linux x64 artifact"
+        description: 'Build for Linux (Ubuntu 22.04)'
         required: true
+        type: boolean
         default: true
-        type: boolean
       build_android:
-        description: "Build Android artifacts"
+        description: 'Build for Android (all architectures)'
         required: true
-        default: false
         type: boolean
+        default: true
+      tdlib_commit:
+        description: 'TDLib commit/branch (empty = latest)'
+        required: false
+        default: ''
+
+env:
+  TDLIB_REPO: https://github.com/tdlib/td.git
 
 jobs:
-  get-commit:
+  # ============================================
+  # Get latest TDLib commit
+  # ============================================
+  get-tdlib-version:
     runs-on: ubuntu-latest
     outputs:
-      commit_hash: ${{ steps.get_hash.outputs.hash }}
-      commit_short: ${{ steps.get_hash.outputs.short }}
+      commit_sha: ${{ steps.get-commit.outputs.sha }}
+      commit_short: ${{ steps.get-commit.outputs.short }}
+    
     steps:
-      - name: Get latest TDLib commit
-        id: get_hash
+      - name: Get TDLib commit
+        id: get-commit
         run: |
-          HASH=$(git ls-remote https://github.com/tdlib/td.git HEAD | cut -f1)
-          SHORT=$(echo "$HASH" | cut -c1-7)
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
-          echo "Latest TDLib commit: $SHORT"
+          if [ -n "${{ inputs.tdlib_commit }}" ]; then
+            # Если указан конкретный коммит/ветка - получаем его SHA
+            COMMIT_SHA=$(git ls-remote ${{ env.TDLIB_REPO }} ${{ inputs.tdlib_commit }} | head -1 | cut -f1)
+            # Если это не ветка/тег, то используем как есть (это может быть SHA)
+            if [ -z "$COMMIT_SHA" ]; then
+              COMMIT_SHA="${{ inputs.tdlib_commit }}"
+            fi
+          else
+            # Получаем последний коммит из master
+            COMMIT_SHA=$(git ls-remote ${{ env.TDLIB_REPO }} HEAD | cut -f1)
+          fi
+          
+          COMMIT_SHORT=${COMMIT_SHA:0:7}
+          
+          echo "sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "short=$COMMIT_SHORT" >> $GITHUB_OUTPUT
+          echo "Using TDLib commit: $COMMIT_SHA ($COMMIT_SHORT)"
 
+  # ============================================
+  # Windows x64 Build
+  # ============================================
   build-windows:
-    needs: get-commit
-    runs-on: windows-2022
     if: ${{ inputs.build_windows }}
-
+    needs: get-tdlib-version
+    runs-on: windows-2022
+    
     steps:
-      - name: Checkout TDLib
-        uses: actions/checkout@v4
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          repository: tdlib/td
-          ref: ${{ needs.get-commit.outputs.commit_hash }}
+          arch: x64
 
-      - name: Set up JDK
+      - name: Setup JDK
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Cache vcpkg
-        uses: actions/cache@v4
-        with:
-          path: ~/AppData/Local/vcpkg/archives
-          key: vcpkg-windows-x64-v3
-          restore-keys: vcpkg-windows-x64-
-
-      - name: Install dependencies via vcpkg
+      - name: Install vcpkg
         run: |
-          vcpkg install gperf:x64-windows openssl:x64-windows zlib:x64-windows
-
-      - name: Configure CMake (TDLib + JNI)
+          git clone https://github.com/Microsoft/vcpkg.git
+          cd vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg integrate install
+          .\vcpkg install openssl:x64-windows zlib:x64-windows
         shell: pwsh
+
+      - name: Install gperf
         run: |
-          $TdInstall = (Resolve-Path "./example/java").Path + "/td"
-          cmake -S . -B build -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
+          choco install gperf -y
+        shell: pwsh
+
+      - name: Clone TDLib
+        run: |
+          git clone ${{ env.TDLIB_REPO }} td
+          cd td
+          git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
+          echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
+        shell: pwsh
+
+      - name: Build TDLib with JNI
+        run: |
+          cd td
+          mkdir jnibuild
+          cd jnibuild
+          cmake -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
             -DTD_ENABLE_JNI=ON `
-            -DCMAKE_INSTALL_PREFIX:PATH=$TdInstall
-
-      - name: Build TDLib (Release)
-        run: |
-          cmake --build build --config Release --parallel 4
-          cmake --install build --config Release
-
-      - name: Configure Java JNI wrapper build
+            -DJAVA_HOME="$env:JAVA_HOME" `
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td `
+            ..
+          cmake --build . --target install --config Release --parallel 4
         shell: pwsh
-        run: |
-          $TdInstall = (Resolve-Path "./example/java/td").Path
-          $JavaInstall = (Resolve-Path "./example/java").Path
-          cmake -S example/java -B example/java/build -A x64 `
-            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DTd_DIR="$TdInstall/lib/cmake/Td" `
-            -DCMAKE_INSTALL_PREFIX:PATH=$JavaInstall
 
-      - name: Build Java JNI wrapper (tdjni)
+      - name: Build JNI Wrapper
         run: |
-          cmake --build example/java/build --config Release --parallel 4
-          cmake --install example/java/build --config Release
-
-      - name: Debug JNI output
+          cd td/example/java
+          mkdir build
+          cd build
+          cmake -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DTd_DIR="${{ github.workspace }}/td/example/java/td/lib/cmake/Td" `
+            -DJAVA_HOME="$env:JAVA_HOME" `
+            -DCMAKE_INSTALL_PREFIX:PATH=.. `
+            ..
+          cmake --build . --target install --config Release
         shell: pwsh
-        run: |
-          Write-Host "=== example/java tree ==="
-          Get-ChildItem -Recurse -File example/java | Where-Object {
-            $_.Name -match 'tdjni|tdjson|libssl|libcrypto|zlib1'
-          } | Select-Object FullName
 
-      - name: Collect package
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/windows-x64
+          cp td/example/java/bin/tdjni.dll artifacts/windows-x64/
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path tdlib-package/bin -Force | Out-Null
-          New-Item -ItemType Directory -Path tdlib-package/lib -Force | Out-Null
-          New-Item -ItemType Directory -Path tdlib-package/include -Force | Out-Null
 
-          if (Test-Path 'example/java/td/include') { Copy-Item -Recurse -Force 'example/java/td/include/*' 'tdlib-package/include/' }
-          if (Test-Path 'example/java/td/lib') { Copy-Item -Recurse -Force 'example/java/td/lib/*' 'tdlib-package/lib/' }
-          if (Test-Path 'example/java/td/bin') { Copy-Item -Recurse -Force 'example/java/td/bin/*' 'tdlib-package/bin/' }
-          if (Test-Path 'example/java/bin') { Copy-Item -Recurse -Force 'example/java/bin/*' 'tdlib-package/bin/' }
-
-          $tdjni = Get-ChildItem -Recurse -File -Path "example/java" -Filter 'tdjni.dll' | Select-Object -First 1
-          if (-not $tdjni) { throw 'tdjni.dll was not produced' }
-          Copy-Item -Force $tdjni.FullName 'tdlib-package/bin/tdjni.dll'
-
-          $tdjson = Get-ChildItem -Recurse -File -Path "example/java/td" -Filter 'tdjson.dll' | Select-Object -First 1
-          if (-not $tdjson) { throw 'tdjson.dll was not produced' }
-          Copy-Item -Force $tdjson.FullName 'tdlib-package/bin/tdjson.dll'
-
-          foreach ($dep in @('libssl-3-x64.dll', 'libcrypto-3-x64.dll', 'zlib1.dll')) {
-            $found = Get-ChildItem -Recurse -File -Filter $dep | Select-Object -First 1
-            if ($found) { Copy-Item -Force $found.FullName "tdlib-package/bin/$dep" }
-          }
-
-      - name: Verify package content
-        shell: pwsh
-        run: |
-          Get-ChildItem -Recurse tdlib-package | Select-Object FullName
-          if (-not (Test-Path 'tdlib-package/bin/tdjni.dll')) { throw 'Missing tdjni.dll in package' }
-          if (-not (Test-Path 'tdlib-package/bin/tdjson.dll')) { throw 'Missing tdjson.dll in package' }
-
-      - name: Upload artifact
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tdjni-windows-x64-${{ needs.get-commit.outputs.commit_short }}
-          path: tdlib-package/
+          name: tdlib-jni-windows-x64-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/windows-x64/tdjni.dll
 
+  # ============================================
+  # Linux (Ubuntu 22.04) Build
+  # ============================================
   build-linux:
-    needs: get-commit
-    runs-on: ubuntu-22.04
     if: ${{ inputs.build_linux }}
-
+    needs: get-tdlib-version
+    runs-on: ubuntu-22.04
+    
     steps:
-      - name: Checkout TDLib
-        uses: actions/checkout@v4
-        with:
-          repository: tdlib/td
-          ref: ${{ needs.get-commit.outputs.commit_hash }}
-
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gperf \
-            cmake \
-            ninja-build \
             build-essential \
-            zlib1g-dev \
+            cmake \
+            gperf \
             libssl-dev \
-            default-jdk
+            zlib1g-dev \
+            ccache
 
-      - name: Configure CMake (TDLib + JNI)
-        run: |
-          TD_INSTALL_DIR="$(pwd)/example/java/td"
-          cmake -S . -B build -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DTD_ENABLE_JNI=ON \
-            -DCMAKE_INSTALL_PREFIX="$TD_INSTALL_DIR"
-
-      - name: Build TDLib (Release)
-        run: |
-          cmake --build build --parallel
-          cmake --install build
-
-      - name: Configure Java JNI wrapper build
-        run: |
-          TD_INSTALL_DIR="$(pwd)/example/java/td"
-          JAVA_INSTALL_DIR="$(pwd)/example/java"
-          cmake -S example/java -B example/java/build -GNinja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DTd_DIR="$TD_INSTALL_DIR/lib/cmake/Td" \
-            -DCMAKE_INSTALL_PREFIX="$JAVA_INSTALL_DIR"
-
-      - name: Build Java JNI wrapper (tdjni)
-        run: |
-          cmake --build example/java/build --parallel
-          cmake --install example/java/build
-
-      - name: Debug JNI output
-        run: |
-          set -euxo pipefail
-          echo "=== example/java tree ==="
-          find example/java -type f | grep -E 'tdjni|tdjson|libssl|libcrypto|zlib' || true
-
-      - name: Collect package
-        run: |
-          set -euxo pipefail
-          mkdir -p tdlib-package/lib tdlib-package/include
-          [ -d example/java/td/include ] && cp -r example/java/td/include/. tdlib-package/include/ || true
-          [ -d example/java/td/lib ] && cp -r example/java/td/lib/. tdlib-package/lib/ || true
-
-          TDJNI_PATH=$(find example/java -type f -name 'libtdjni.so' | head -n1 || true)
-          TDJSON_PATH=$(find example/java/td -type f -name 'libtdjson.so' | head -n1 || true)
-          if [ -z "$TDJNI_PATH" ]; then echo 'libtdjni.so was not produced' && exit 1; fi
-          if [ -z "$TDJSON_PATH" ]; then echo 'libtdjson.so was not produced' && exit 1; fi
-          cp "$TDJNI_PATH" tdlib-package/lib/libtdjni.so
-          cp "$TDJSON_PATH" tdlib-package/lib/libtdjson.so
-
-      - name: Verify package content
-        run: |
-          set -euxo pipefail
-          find tdlib-package -type f
-          test -f tdlib-package/lib/libtdjni.so
-          test -f tdlib-package/lib/libtdjson.so
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tdjni-linux-x64-${{ needs.get-commit.outputs.commit_short }}
-          path: tdlib-package/
-
-  build-android:
-    needs: get-commit
-    runs-on: ubuntu-22.04
-    if: ${{ inputs.build_android }}
-
-    steps:
-      - name: Checkout TDLib
-        uses: actions/checkout@v4
-        with:
-          repository: tdlib/td
-          ref: ${{ needs.get-commit.outputs.commit_hash }}
-
-      - name: Set up JDK
+      - name: Setup JDK
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Clone TDLib
+        run: |
+          git clone ${{ env.TDLIB_REPO }} td
+          cd td
+          git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
+          echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
+
+      - name: Build TDLib with JNI
+        run: |
+          cd td
+          mkdir jnibuild
+          cd jnibuild
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTD_ENABLE_JNI=ON \
+            -DJAVA_HOME="$JAVA_HOME" \
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
+            ..
+          cmake --build . --target install -j $(nproc)
+
+      - name: Build JNI Wrapper
+        run: |
+          cd td/example/java
+          mkdir build
+          cd build
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTd_DIR="${{ github.workspace }}/td/example/java/td/lib/cmake/Td" \
+            -DJAVA_HOME="$JAVA_HOME" \
+            -DCMAKE_INSTALL_PREFIX:PATH=.. \
+            ..
+          cmake --build . --target install -j $(nproc)
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/linux-x64
+          cp td/example/java/bin/libtdjni.so artifacts/linux-x64/
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-jni-linux-x64-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/linux-x64/libtdjni.so
+
+  # ============================================
+  # Android Build (all architectures)
+  # ============================================
+  build-android:
+    if: ${{ inputs.build_android }}
+    needs: get-tdlib-version
+    runs-on: ubuntu-22.04
+    
+    strategy:
+      matrix:
+        abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
+        include:
+          - abi: armeabi-v7a
+            api_level: 21
+          - abi: arm64-v8a
+            api_level: 21
+          - abi: x86
+            api_level: 21
+          - abi: x86_64
+            api_level: 21
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            gperf \
+            ninja-build \
+            ccache \
+            php-cli
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android toolchain
+      - name: Install Android NDK
         run: |
-          yes | sdkmanager --licenses
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
 
-      - name: Install system dependencies
+      - name: Clone TDLib
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gperf cmake ninja-build php unzip
+          git clone ${{ env.TDLIB_REPO }} td
+          cd td
+          git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
+          echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
 
-      - name: Build TDLib for Android (all ABIs)
+      - name: Download and Build OpenSSL for Android
         run: |
-          set -euxo pipefail
-          chmod +x example/android/*.sh
-          cd example/android
-          ./build-openssl.sh "$ANDROID_HOME" "26.1.10909125"
-          ./build-tdlib.sh "$ANDROID_HOME" "26.1.10909125" "third-party/openssl" "c++_static" "Java"
+          # Download OpenSSL
+          wget https://www.openssl.org/source/openssl-3.0.12.tar.gz
+          tar -xzf openssl-3.0.12.tar.gz
+          
+          # Set variables
+          OPENSSL_DIR=${{ github.workspace }}/openssl-3.0.12
+          INSTALL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
+          mkdir -p $INSTALL_DIR
+          
+          cd $OPENSSL_DIR
+          
+          # Configure based on ABI
+          case "${{ matrix.abi }}" in
+            armeabi-v7a)
+              ANDROID_ARCH=android-arm
+              ;;
+            arm64-v8a)
+              ANDROID_ARCH=android-arm64
+              ;;
+            x86)
+              ANDROID_ARCH=android-x86
+              ;;
+            x86_64)
+              ANDROID_ARCH=android-x86_64
+              ;;
+          esac
+          
+          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
+          export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
+          
+          ./Configure $ANDROID_ARCH \
+            -D__ANDROID_API__=${{ matrix.api_level }} \
+            --prefix=$INSTALL_DIR \
+            no-shared \
+            no-tests
+          
+          make -j $(nproc)
+          make install_sw
 
-      - name: Verify Android artifacts
+      - name: Build TDLib for Android
         run: |
-          set -euxo pipefail
-          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-            test -f "example/android/tdlib/libs/$abi/libtdjni.so"
-          done
-          test -d "example/android/tdlib/java"
-          echo "=== Android TDLib output ==="
-          find example/android/tdlib -type f | head -200
+          cd td
+          mkdir build-android-${{ matrix.abi }}
+          cd build-android-${{ matrix.abi }}
+          
+          OPENSSL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
+          
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
+            -DANDROID_STL=c++_static \
+            -DTD_ENABLE_JNI=ON \
+            -DOPENSSL_ROOT_DIR=$OPENSSL_DIR \
+            -DOPENSSL_INCLUDE_DIR=$OPENSSL_DIR/include \
+            -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_DIR/lib/libcrypto.a \
+            -DOPENSSL_SSL_LIBRARY=$OPENSSL_DIR/lib/libssl.a \
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td-android-${{ matrix.abi }} \
+            -GNinja \
+            ..
+          
+          ninja install
+
+      - name: Build JNI Wrapper for Android
+        run: |
+          cd td/example/java
+          mkdir build-android-${{ matrix.abi }}
+          cd build-android-${{ matrix.abi }}
+          
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
+            -DANDROID_STL=c++_static \
+            -DTd_DIR=${{ github.workspace }}/td/example/java/td-android-${{ matrix.abi }}/lib/cmake/Td \
+            -DCMAKE_INSTALL_PREFIX:PATH=.. \
+            -GNinja \
+            ..
+          
+          ninja install
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/android/${{ matrix.abi }}
+          find td/example/java -name "libtdjni.so" -exec cp {} artifacts/android/${{ matrix.abi }}/ \;
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tdjni-android-all-${{ needs.get-commit.outputs.commit_short }}
-          path: |
-            example/android/tdlib/libs/
-            example/android/tdlib/java/
+          name: tdlib-jni-android-${{ matrix.abi }}-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/android/${{ matrix.abi }}/libtdjni.so
+
+  # ============================================
+  # Combine all artifacts
+  # ============================================
+  combine-artifacts:
+    runs-on: ubuntu-latest
+    needs: [get-tdlib-version, build-windows, build-linux, build-android]
+    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-android.result == 'success')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Organize artifacts
+        run: |
+          COMMIT_SHORT=${{ needs.get-tdlib-version.outputs.commit_short }}
+          
+          mkdir -p release/windows-x64
+          mkdir -p release/linux-x64
+          mkdir -p release/android/armeabi-v7a
+          mkdir -p release/android/arm64-v8a
+          mkdir -p release/android/x86
+          mkdir -p release/android/x86_64
+          
+          # Copy if exists
+          [ -d "all-artifacts/tdlib-jni-windows-x64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-windows-x64-$COMMIT_SHORT/* release/windows-x64/ || true
+          [ -d "all-artifacts/tdlib-jni-linux-x64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-linux-x64-$COMMIT_SHORT/* release/linux-x64/ || true
+          [ -d "all-artifacts/tdlib-jni-android-armeabi-v7a-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-armeabi-v7a-$COMMIT_SHORT/* release/android/armeabi-v7a/ || true
+          [ -d "all-artifacts/tdlib-jni-android-arm64-v8a-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-arm64-v8a-$COMMIT_SHORT/* release/android/arm64-v8a/ || true
+          [ -d "all-artifacts/tdlib-jni-android-x86-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86-$COMMIT_SHORT/* release/android/x86/ || true
+          [ -d "all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT/* release/android/x86_64/ || true
+          
+          # Create version info file
+          echo "TDLib commit: ${{ needs.get-tdlib-version.outputs.commit_sha }}" > release/VERSION.txt
+          echo "Build date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> release/VERSION.txt
+          
+          # Show structure
+          echo "=== Build artifacts ==="
+          find release -type f -ls
+
+      - name: Upload combined release
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-jni-all-platforms-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: release/
