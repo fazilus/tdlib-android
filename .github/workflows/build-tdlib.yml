@@ -55,9 +55,10 @@ jobs:
             -DTD_ENABLE_JNI=ON `
             -DCMAKE_INSTALL_PREFIX:PATH=./tdlib-install
 
-      - name: Build targets (tdjni + tdjson + install)
+      - name: Build TDLib (Release)
         run: |
-          cmake --build build --config Release --target tdjni tdjson install --parallel 4
+          cmake --build build --config Release --parallel 4
+          cmake --install build --config Release
 
       - name: Collect package
         shell: pwsh
@@ -133,9 +134,10 @@ jobs:
             -DTD_ENABLE_JNI=ON \
             -DCMAKE_INSTALL_PREFIX=./tdlib-install
 
-      - name: Build targets (tdjni + tdjson + install)
+      - name: Build TDLib (Release)
         run: |
-          cmake --build build --target tdjni tdjson install --parallel
+          cmake --build build --parallel
+          cmake --install build
 
       - name: Collect package
         run: |
@@ -199,7 +201,6 @@ jobs:
           set -euxo pipefail
           chmod +x example/android/*.sh
           cd example/android
-          ./fetch-sdk.sh "$ANDROID_HOME" "26.1.10909125"
           ./build-openssl.sh "$ANDROID_HOME" "26.1.10909125"
           ./build-tdlib.sh "$ANDROID_HOME" "26.1.10909125" "third-party/openssl" "c++_static" "Java"
 
