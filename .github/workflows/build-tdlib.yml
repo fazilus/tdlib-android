@@ -1,0 +1,222 @@
+name: Build TDLib JNI (Windows/Linux/Android)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  get-commit:
+    runs-on: ubuntu-latest
+    outputs:
+      commit_hash: ${{ steps.get_hash.outputs.hash }}
+      commit_short: ${{ steps.get_hash.outputs.short }}
+    steps:
+      - name: Get latest TDLib commit
+        id: get_hash
+        run: |
+          HASH=$(git ls-remote https://github.com/tdlib/td.git HEAD | cut -f1)
+          SHORT=$(echo "$HASH" | cut -c1-7)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "Latest TDLib commit: $SHORT"
+
+  build-windows:
+    needs: get-commit
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout TDLib
+        uses: actions/checkout@v4
+        with:
+          repository: tdlib/td
+          ref: ${{ needs.get-commit.outputs.commit_hash }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-windows-x64-v3
+          restore-keys: vcpkg-windows-x64-
+
+      - name: Install dependencies via vcpkg
+        run: |
+          vcpkg install gperf:x64-windows openssl:x64-windows zlib:x64-windows
+
+      - name: Configure CMake (TDLib + JNI)
+        run: |
+          cmake -S . -B build -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DTD_ENABLE_JNI=ON `
+            -DCMAKE_INSTALL_PREFIX:PATH=./tdlib-install
+
+      - name: Build targets (tdjni + tdjson + install)
+        run: |
+          cmake --build build --config Release --target tdjni tdjson install --parallel 4
+
+      - name: Collect package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path tdlib-package/bin -Force | Out-Null
+          New-Item -ItemType Directory -Path tdlib-package/lib -Force | Out-Null
+          New-Item -ItemType Directory -Path tdlib-package/include -Force | Out-Null
+
+          if (Test-Path 'tdlib-install/include') { Copy-Item -Recurse -Force 'tdlib-install/include/*' 'tdlib-package/include/' }
+          if (Test-Path 'tdlib-install/lib') { Copy-Item -Recurse -Force 'tdlib-install/lib/*' 'tdlib-package/lib/' }
+          if (Test-Path 'tdlib-install/bin') { Copy-Item -Recurse -Force 'tdlib-install/bin/*' 'tdlib-package/bin/' }
+
+          $tdjni = Get-ChildItem -Recurse -File -Filter 'tdjni.dll' | Select-Object -First 1
+          if (-not $tdjni) { throw 'tdjni.dll was not produced' }
+          Copy-Item -Force $tdjni.FullName 'tdlib-package/bin/tdjni.dll'
+
+          $tdjson = Get-ChildItem -Recurse -File -Filter 'tdjson.dll' | Select-Object -First 1
+          if (-not $tdjson) { throw 'tdjson.dll was not produced' }
+          Copy-Item -Force $tdjson.FullName 'tdlib-package/bin/tdjson.dll'
+
+          foreach ($dep in @('libssl-3-x64.dll', 'libcrypto-3-x64.dll', 'zlib1.dll')) {
+            $found = Get-ChildItem -Recurse -File -Filter $dep | Select-Object -First 1
+            if ($found) { Copy-Item -Force $found.FullName "tdlib-package/bin/$dep" }
+          }
+
+      - name: Verify package content
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse tdlib-package | Select-Object FullName
+          if (-not (Test-Path 'tdlib-package/bin/tdjni.dll')) { throw 'Missing tdjni.dll in package' }
+          if (-not (Test-Path 'tdlib-package/bin/tdjson.dll')) { throw 'Missing tdjson.dll in package' }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdjni-windows-x64-${{ needs.get-commit.outputs.commit_short }}
+          path: tdlib-package/
+
+  build-linux:
+    needs: get-commit
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout TDLib
+        uses: actions/checkout@v4
+        with:
+          repository: tdlib/td
+          ref: ${{ needs.get-commit.outputs.commit_hash }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gperf \
+            cmake \
+            ninja-build \
+            build-essential \
+            zlib1g-dev \
+            libssl-dev \
+            default-jdk
+
+      - name: Configure CMake (TDLib + JNI)
+        run: |
+          cmake -S . -B build -GNinja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTD_ENABLE_JNI=ON \
+            -DCMAKE_INSTALL_PREFIX=./tdlib-install
+
+      - name: Build targets (tdjni + tdjson + install)
+        run: |
+          cmake --build build --target tdjni tdjson install --parallel
+
+      - name: Collect package
+        run: |
+          set -euxo pipefail
+          mkdir -p tdlib-package/lib tdlib-package/include
+          [ -d tdlib-install/include ] && cp -r tdlib-install/include/. tdlib-package/include/ || true
+          [ -d tdlib-install/lib ] && cp -r tdlib-install/lib/. tdlib-package/lib/ || true
+
+          TDJNI_PATH=$(find . -type f -name 'libtdjni.so' | head -n1 || true)
+          TDJSON_PATH=$(find . -type f -name 'libtdjson.so' | head -n1 || true)
+          if [ -z "$TDJNI_PATH" ]; then echo 'libtdjni.so was not produced' && exit 1; fi
+          if [ -z "$TDJSON_PATH" ]; then echo 'libtdjson.so was not produced' && exit 1; fi
+          cp "$TDJNI_PATH" tdlib-package/lib/libtdjni.so
+          cp "$TDJSON_PATH" tdlib-package/lib/libtdjson.so
+
+      - name: Verify package content
+        run: |
+          set -euxo pipefail
+          find tdlib-package -type f
+          test -f tdlib-package/lib/libtdjni.so
+          test -f tdlib-package/lib/libtdjson.so
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdjni-linux-x64-${{ needs.get-commit.outputs.commit_short }}
+          path: tdlib-package/
+
+  build-android:
+    needs: get-commit
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout TDLib
+        uses: actions/checkout@v4
+        with:
+          repository: tdlib/td
+          ref: ${{ needs.get-commit.outputs.commit_hash }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android toolchain
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gperf cmake ninja-build php unzip
+
+      - name: Build TDLib for Android (all ABIs)
+        run: |
+          set -euxo pipefail
+          chmod +x example/android/*.sh
+          cd example/android
+          ./fetch-sdk.sh "$ANDROID_HOME" "26.1.10909125"
+          ./build-openssl.sh "$ANDROID_HOME" "26.1.10909125"
+          ./build-tdlib.sh "$ANDROID_HOME" "26.1.10909125" "third-party/openssl" "c++_static" "Java"
+
+      - name: Verify Android artifacts
+        run: |
+          set -euxo pipefail
+          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
+            test -f "example/android/tdlib/libs/$abi/libtdjni.so"
+          done
+          test -d "example/android/tdlib/java"
+          echo "=== Android TDLib output ==="
+          find example/android/tdlib -type f | head -200
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdjni-android-all-${{ needs.get-commit.outputs.commit_short }}
+          path: |
+            example/android/tdlib/libs/
+            example/android/tdlib/java/
