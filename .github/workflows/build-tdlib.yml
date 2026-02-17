@@ -14,17 +14,17 @@ on:
         type: boolean
         default: true
       build_android:
-        description: 'Build for Android (all architectures)'
+        description: 'Build for Android'
         required: true
         type: boolean
         default: true
       build_javadoc:
-        description: 'Build Java files and documentation'
+        description: 'Build Javadoc documentation'
         required: true
         type: boolean
         default: false
       tdlib_commit:
-        description: 'Input TDLib commit/branch (empty = latest)'
+        description: 'TDLib commit/branch (empty = latest)'
         required: false
         default: ''
 
@@ -391,7 +391,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             ..
           
-          # Build only the generators needed for cross-compilation
           cmake --build . --target prepare_cross_compiling --parallel $(nproc)
 
       - name: Build OpenSSL for Android
@@ -453,7 +452,7 @@ jobs:
           ninja
           ninja install
 
-      - name: Patch CMakeLists.txt to skip javadoc
+      - name: Patch CMakeLists.txt for Android (skip javadoc and fix JNI)
         run: |
           cd td/example/java
           
@@ -463,6 +462,7 @@ jobs:
           with open('CMakeLists.txt', 'r') as f:
               content = f.read()
           
+          # Remove build_java and generate_javadoc dependencies
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
               'add_dependencies(tdjni td_generate_java_api)',
@@ -479,9 +479,27 @@ jobs:
               content
           )
           
+          # Replace find_package(JNI REQUIRED) with manual JNI setup for Android
+          content = re.sub(
+              r'find_package\(JNI REQUIRED\)',
+              '''# JNI setup for Android cross-compilation
+          if(ANDROID)
+            set(JNI_INCLUDE_DIRS "$ENV{JAVA_HOME}/include" "$ENV{JAVA_HOME}/include/linux")
+            set(JNI_FOUND TRUE)
+          else()
+            find_package(JNI REQUIRED)
+          endif()''',
+              content
+          )
+          
           with open('CMakeLists.txt', 'w') as f:
               f.write(content)
+          
+          print("CMakeLists.txt patched for Android")
           EOF
+          
+          echo "=== Patched CMakeLists.txt ==="
+          head -30 CMakeLists.txt
 
       - name: Configure JNI Wrapper for Android
         run: |
@@ -496,6 +514,7 @@ jobs:
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
             -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
+            -DJAVA_HOME=$JAVA_HOME \
             -GNinja \
             ..
 
