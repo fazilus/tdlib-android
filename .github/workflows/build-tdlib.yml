@@ -41,14 +41,11 @@ jobs:
         id: get-commit
         run: |
           if [ -n "${{ inputs.tdlib_commit }}" ]; then
-            # Если указан конкретный коммит/ветка - получаем его SHA
             COMMIT_SHA=$(git ls-remote ${{ env.TDLIB_REPO }} ${{ inputs.tdlib_commit }} | head -1 | cut -f1)
-            # Если это не ветка/тег, то используем как есть (это может быть SHA)
             if [ -z "$COMMIT_SHA" ]; then
               COMMIT_SHA="${{ inputs.tdlib_commit }}"
             fi
           else
-            # Получаем последний коммит из master
             COMMIT_SHA=$(git ls-remote ${{ env.TDLIB_REPO }} HEAD | cut -f1)
           fi
           
@@ -78,18 +75,16 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install vcpkg
+      - name: Install vcpkg dependencies
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
           .\bootstrap-vcpkg.bat
-          .\vcpkg integrate install
           .\vcpkg install openssl:x64-windows zlib:x64-windows
         shell: pwsh
 
       - name: Install gperf
-        run: |
-          choco install gperf -y
+        run: choco install gperf -y
         shell: pwsh
 
       - name: Clone TDLib
@@ -112,7 +107,8 @@ jobs:
             -DJAVA_HOME="$env:JAVA_HOME" `
             -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td `
             ..
-          cmake --build . --target install --config Release --parallel 4
+          cmake --build . --config Release --parallel 4
+          cmake --install . --config Release
         shell: pwsh
 
       - name: Build JNI Wrapper
@@ -126,13 +122,25 @@ jobs:
             -DJAVA_HOME="$env:JAVA_HOME" `
             -DCMAKE_INSTALL_PREFIX:PATH=.. `
             ..
-          cmake --build . --target install --config Release
+          cmake --build . --config Release
+          cmake --install . --config Release
         shell: pwsh
 
-      - name: Prepare artifacts
+      - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/windows-x64
-          cp td/example/java/bin/tdjni.dll artifacts/windows-x64/
+          
+          # Поиск tdjni.dll в разных возможных местах
+          $dllPath = Get-ChildItem -Path td -Recurse -Filter "tdjni.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          
+          if ($dllPath) {
+            Write-Host "Found tdjni.dll at: $($dllPath.FullName)"
+            Copy-Item $dllPath.FullName -Destination artifacts/windows-x64/
+          } else {
+            Write-Host "Searching for any built DLLs..."
+            Get-ChildItem -Path td -Recurse -Filter "*.dll" | ForEach-Object { Write-Host $_.FullName }
+            exit 1
+          }
         shell: pwsh
 
       - name: Upload Windows artifact
@@ -159,7 +167,7 @@ jobs:
             gperf \
             libssl-dev \
             zlib1g-dev \
-            ccache
+            default-jdk
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -185,7 +193,8 @@ jobs:
             -DJAVA_HOME="$JAVA_HOME" \
             -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
             ..
-          cmake --build . --target install -j $(nproc)
+          cmake --build . --parallel $(nproc)
+          cmake --install .
 
       - name: Build JNI Wrapper
         run: |
@@ -198,12 +207,24 @@ jobs:
             -DJAVA_HOME="$JAVA_HOME" \
             -DCMAKE_INSTALL_PREFIX:PATH=.. \
             ..
-          cmake --build . --target install -j $(nproc)
+          cmake --build . --parallel $(nproc) --verbose
+          cmake --install .
 
-      - name: Prepare artifacts
+      - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/linux-x64
-          cp td/example/java/bin/libtdjni.so artifacts/linux-x64/
+          
+          # Поиск libtdjni.so
+          SO_FILE=$(find td -name "libtdjni.so" -type f 2>/dev/null | head -1)
+          
+          if [ -n "$SO_FILE" ]; then
+            echo "Found libtdjni.so at: $SO_FILE"
+            cp "$SO_FILE" artifacts/linux-x64/
+          else
+            echo "libtdjni.so not found! Searching for all .so files:"
+            find td -name "*.so" -type f
+            exit 1
+          fi
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
@@ -220,6 +241,7 @@ jobs:
     runs-on: ubuntu-22.04
     
     strategy:
+      fail-fast: false
       matrix:
         abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
         include:
@@ -241,7 +263,6 @@ jobs:
             cmake \
             gperf \
             ninja-build \
-            ccache \
             php-cli
 
       - name: Setup JDK
@@ -268,31 +289,20 @@ jobs:
 
       - name: Download and Build OpenSSL for Android
         run: |
-          # Download OpenSSL
-          wget https://www.openssl.org/source/openssl-3.0.12.tar.gz
+          wget -q https://www.openssl.org/source/openssl-3.0.12.tar.gz
           tar -xzf openssl-3.0.12.tar.gz
           
-          # Set variables
           OPENSSL_DIR=${{ github.workspace }}/openssl-3.0.12
           INSTALL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
           mkdir -p $INSTALL_DIR
           
           cd $OPENSSL_DIR
           
-          # Configure based on ABI
           case "${{ matrix.abi }}" in
-            armeabi-v7a)
-              ANDROID_ARCH=android-arm
-              ;;
-            arm64-v8a)
-              ANDROID_ARCH=android-arm64
-              ;;
-            x86)
-              ANDROID_ARCH=android-x86
-              ;;
-            x86_64)
-              ANDROID_ARCH=android-x86_64
-              ;;
+            armeabi-v7a) ANDROID_ARCH=android-arm ;;
+            arm64-v8a)   ANDROID_ARCH=android-arm64 ;;
+            x86)         ANDROID_ARCH=android-x86 ;;
+            x86_64)      ANDROID_ARCH=android-x86_64 ;;
           esac
           
           export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
@@ -330,6 +340,7 @@ jobs:
             -GNinja \
             ..
           
+          ninja
           ninja install
 
       - name: Build JNI Wrapper for Android
@@ -349,12 +360,23 @@ jobs:
             -GNinja \
             ..
           
+          ninja
           ninja install
 
-      - name: Prepare artifacts
+      - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/android/${{ matrix.abi }}
-          find td/example/java -name "libtdjni.so" -exec cp {} artifacts/android/${{ matrix.abi }}/ \;
+          
+          SO_FILE=$(find td -name "libtdjni.so" -type f 2>/dev/null | head -1)
+          
+          if [ -n "$SO_FILE" ]; then
+            echo "Found libtdjni.so at: $SO_FILE"
+            cp "$SO_FILE" artifacts/android/${{ matrix.abi }}/
+          else
+            echo "libtdjni.so not found! Searching for all .so files:"
+            find td -name "*.so" -type f
+            exit 1
+          fi
 
       - name: Upload Android artifact
         uses: actions/upload-artifact@v4
@@ -387,7 +409,6 @@ jobs:
           mkdir -p release/android/x86
           mkdir -p release/android/x86_64
           
-          # Copy if exists
           [ -d "all-artifacts/tdlib-jni-windows-x64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-windows-x64-$COMMIT_SHORT/* release/windows-x64/ || true
           [ -d "all-artifacts/tdlib-jni-linux-x64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-linux-x64-$COMMIT_SHORT/* release/linux-x64/ || true
           [ -d "all-artifacts/tdlib-jni-android-armeabi-v7a-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-armeabi-v7a-$COMMIT_SHORT/* release/android/armeabi-v7a/ || true
@@ -395,11 +416,9 @@ jobs:
           [ -d "all-artifacts/tdlib-jni-android-x86-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86-$COMMIT_SHORT/* release/android/x86/ || true
           [ -d "all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT/* release/android/x86_64/ || true
           
-          # Create version info file
           echo "TDLib commit: ${{ needs.get-tdlib-version.outputs.commit_sha }}" > release/VERSION.txt
           echo "Build date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> release/VERSION.txt
           
-          # Show structure
           echo "=== Build artifacts ==="
           find release -type f -ls
 
