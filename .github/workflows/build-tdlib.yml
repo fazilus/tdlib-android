@@ -75,17 +75,20 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Install vcpkg dependencies
+      - name: Install gperf
+        run: choco install gperf -y
+
+      - name: Install vcpkg and dependencies
         run: |
+          cd ${{ github.workspace }}
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
           .\bootstrap-vcpkg.bat
           .\vcpkg install openssl:x64-windows zlib:x64-windows
-        shell: pwsh
-
-      - name: Install gperf
-        run: choco install gperf -y
-        shell: pwsh
+          
+          # Verify installation
+          echo "=== Installed packages ==="
+          .\vcpkg list
 
       - name: Clone TDLib
         run: |
@@ -93,55 +96,78 @@ jobs:
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
           echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
-        shell: pwsh
 
-      - name: Build TDLib with JNI
+      - name: Configure TDLib with JNI
         run: |
           cd td
           mkdir jnibuild
           cd jnibuild
+          
+          $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
+          
           cmake -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DTD_ENABLE_JNI=ON `
             -DJAVA_HOME="$env:JAVA_HOME" `
-            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td `
+            -DJAVA_INCLUDE_PATH="$env:JAVA_HOME/include" `
+            -DJAVA_AWT_LIBRARY="$env:JAVA_HOME/lib/jawt.lib" `
+            -DJAVA_JVM_LIBRARY="$env:JAVA_HOME/lib/jvm.lib" `
+            -DCMAKE_INSTALL_PREFIX:PATH="../tdlib-install" `
             ..
-          cmake --build . --config Release --parallel 4
-          cmake --install . --config Release
-        shell: pwsh
+          
+          echo "=== CMake configuration complete ==="
 
-      - name: Build JNI Wrapper
+      - name: Build TDLib
+        run: |
+          cd td/jnibuild
+          cmake --build . --config Release --parallel 4
+          
+      - name: Install TDLib
+        run: |
+          cd td/jnibuild
+          cmake --install . --config Release
+
+      - name: Configure JNI Wrapper
         run: |
           cd td/example/java
           mkdir build
           cd build
+          
           cmake -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
-            -DTd_DIR="${{ github.workspace }}/td/example/java/td/lib/cmake/Td" `
+            -DTd_DIR="${{ github.workspace }}/td/tdlib-install/lib/cmake/Td" `
             -DJAVA_HOME="$env:JAVA_HOME" `
-            -DCMAKE_INSTALL_PREFIX:PATH=.. `
+            -DJAVA_INCLUDE_PATH="$env:JAVA_HOME/include" `
+            -DJAVA_AWT_LIBRARY="$env:JAVA_HOME/lib/jawt.lib" `
+            -DJAVA_JVM_LIBRARY="$env:JAVA_HOME/lib/jvm.lib" `
             ..
-          cmake --build . --config Release
-          cmake --install . --config Release
-        shell: pwsh
+          
+          echo "=== JNI Wrapper CMake configuration complete ==="
+
+      - name: Build JNI Wrapper
+        run: |
+          cd td/example/java/build
+          cmake --build . --config Release --target tdjni
 
       - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/windows-x64
           
-          # Поиск tdjni.dll в разных возможных местах
-          $dllPath = Get-ChildItem -Path td -Recurse -Filter "tdjni.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          echo "=== Searching for tdjni.dll ==="
+          $dllFiles = Get-ChildItem -Path td -Recurse -Filter "tdjni.dll" -ErrorAction SilentlyContinue
           
-          if ($dllPath) {
-            Write-Host "Found tdjni.dll at: $($dllPath.FullName)"
-            Copy-Item $dllPath.FullName -Destination artifacts/windows-x64/
+          if ($dllFiles) {
+            foreach ($dll in $dllFiles) {
+              Write-Host "Found: $($dll.FullName)"
+            }
+            Copy-Item $dllFiles[0].FullName -Destination artifacts/windows-x64/
           } else {
-            Write-Host "Searching for any built DLLs..."
+            Write-Host "tdjni.dll not found! All DLLs:"
             Get-ChildItem -Path td -Recurse -Filter "*.dll" | ForEach-Object { Write-Host $_.FullName }
             exit 1
           }
-        shell: pwsh
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -166,8 +192,7 @@ jobs:
             cmake \
             gperf \
             libssl-dev \
-            zlib1g-dev \
-            default-jdk
+            zlib1g-dev
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -182,7 +207,7 @@ jobs:
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
           echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
 
-      - name: Build TDLib with JNI
+      - name: Configure TDLib with JNI
         run: |
           cd td
           mkdir jnibuild
@@ -191,37 +216,47 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DTD_ENABLE_JNI=ON \
             -DJAVA_HOME="$JAVA_HOME" \
-            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
+            -DCMAKE_INSTALL_PREFIX:PATH="../tdlib-install" \
             ..
+
+      - name: Build TDLib
+        run: |
+          cd td/jnibuild
           cmake --build . --parallel $(nproc)
+
+      - name: Install TDLib
+        run: |
+          cd td/jnibuild
           cmake --install .
 
-      - name: Build JNI Wrapper
+      - name: Configure JNI Wrapper
         run: |
           cd td/example/java
           mkdir build
           cd build
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
-            -DTd_DIR="${{ github.workspace }}/td/example/java/td/lib/cmake/Td" \
+            -DTd_DIR="${{ github.workspace }}/td/tdlib-install/lib/cmake/Td" \
             -DJAVA_HOME="$JAVA_HOME" \
-            -DCMAKE_INSTALL_PREFIX:PATH=.. \
             ..
-          cmake --build . --parallel $(nproc) --verbose
-          cmake --install .
+
+      - name: Build JNI Wrapper (tdjni only)
+        run: |
+          cd td/example/java/build
+          cmake --build . --target tdjni --parallel $(nproc)
 
       - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/linux-x64
           
-          # Поиск libtdjni.so
+          echo "=== Searching for libtdjni.so ==="
           SO_FILE=$(find td -name "libtdjni.so" -type f 2>/dev/null | head -1)
           
           if [ -n "$SO_FILE" ]; then
-            echo "Found libtdjni.so at: $SO_FILE"
+            echo "Found: $SO_FILE"
             cp "$SO_FILE" artifacts/linux-x64/
           else
-            echo "libtdjni.so not found! Searching for all .so files:"
+            echo "libtdjni.so not found! All .so files:"
             find td -name "*.so" -type f
             exit 1
           fi
@@ -276,7 +311,7 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+          sdkmanager --install "ndk;26.1.10909125"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
           echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
 
@@ -287,7 +322,7 @@ jobs:
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
           echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
 
-      - name: Download and Build OpenSSL for Android
+      - name: Build OpenSSL for Android
         run: |
           wget -q https://www.openssl.org/source/openssl-3.0.12.tar.gz
           tar -xzf openssl-3.0.12.tar.gz
@@ -317,7 +352,7 @@ jobs:
           make -j $(nproc)
           make install_sw
 
-      - name: Build TDLib for Android
+      - name: Configure TDLib for Android
         run: |
           cd td
           mkdir build-android-${{ matrix.abi }}
@@ -336,14 +371,17 @@ jobs:
             -DOPENSSL_INCLUDE_DIR=$OPENSSL_DIR/include \
             -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_DIR/lib/libcrypto.a \
             -DOPENSSL_SSL_LIBRARY=$OPENSSL_DIR/lib/libssl.a \
-            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td-android-${{ matrix.abi }} \
+            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib-install-${{ matrix.abi }} \
             -GNinja \
             ..
-          
+
+      - name: Build TDLib for Android
+        run: |
+          cd td/build-android-${{ matrix.abi }}
           ninja
           ninja install
 
-      - name: Build JNI Wrapper for Android
+      - name: Configure JNI Wrapper for Android
         run: |
           cd td/example/java
           mkdir build-android-${{ matrix.abi }}
@@ -355,25 +393,27 @@ jobs:
             -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
-            -DTd_DIR=${{ github.workspace }}/td/example/java/td-android-${{ matrix.abi }}/lib/cmake/Td \
-            -DCMAKE_INSTALL_PREFIX:PATH=.. \
+            -DTd_DIR=${{ github.workspace }}/td/tdlib-install-${{ matrix.abi }}/lib/cmake/Td \
             -GNinja \
             ..
-          
-          ninja
-          ninja install
+
+      - name: Build JNI Wrapper for Android
+        run: |
+          cd td/example/java/build-android-${{ matrix.abi }}
+          ninja tdjni
 
       - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/android/${{ matrix.abi }}
           
+          echo "=== Searching for libtdjni.so ==="
           SO_FILE=$(find td -name "libtdjni.so" -type f 2>/dev/null | head -1)
           
           if [ -n "$SO_FILE" ]; then
-            echo "Found libtdjni.so at: $SO_FILE"
+            echo "Found: $SO_FILE"
             cp "$SO_FILE" artifacts/android/${{ matrix.abi }}/
           else
-            echo "libtdjni.so not found! Searching for all .so files:"
+            echo "libtdjni.so not found! All .so files:"
             find td -name "*.so" -type f
             exit 1
           fi
