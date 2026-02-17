@@ -75,22 +75,29 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Set JAVA_HOME with forward slashes
+        id: java-path
+        shell: bash
+        run: |
+          # Convert backslashes to forward slashes
+          JAVA_HOME_FIXED=$(echo "$JAVA_HOME" | sed 's|\\|/|g')
+          echo "JAVA_HOME_CMAKE=$JAVA_HOME_FIXED" >> $GITHUB_ENV
+          echo "Java home: $JAVA_HOME_FIXED"
+
       - name: Install gperf
         run: choco install gperf -y
 
       - name: Install vcpkg and dependencies
+        shell: pwsh
         run: |
           cd ${{ github.workspace }}
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
           .\bootstrap-vcpkg.bat
           .\vcpkg install openssl:x64-windows zlib:x64-windows
-          
-          # Verify installation
-          echo "=== Installed packages ==="
-          .\vcpkg list
 
       - name: Clone TDLib
+        shell: bash
         run: |
           git clone ${{ env.TDLIB_REPO }} td
           cd td
@@ -98,60 +105,54 @@ jobs:
           echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
 
       - name: Configure TDLib with JNI
+        shell: bash
         run: |
           cd td
-          mkdir jnibuild
+          mkdir -p jnibuild
           cd jnibuild
           
-          $env:VCPKG_ROOT = "${{ github.workspace }}/vcpkg"
-          
-          cmake -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_TARGET_TRIPLET=x64-windows `
-            -DTD_ENABLE_JNI=ON `
-            -DJAVA_HOME="$env:JAVA_HOME" `
-            -DJAVA_INCLUDE_PATH="$env:JAVA_HOME/include" `
-            -DJAVA_AWT_LIBRARY="$env:JAVA_HOME/lib/jawt.lib" `
-            -DJAVA_JVM_LIBRARY="$env:JAVA_HOME/lib/jvm.lib" `
-            -DCMAKE_INSTALL_PREFIX:PATH="../tdlib-install" `
+          cmake -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-windows \
+            -DTD_ENABLE_JNI=ON \
+            -DJAVA_HOME="$JAVA_HOME_CMAKE" \
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
             ..
-          
-          echo "=== CMake configuration complete ==="
 
       - name: Build TDLib
+        shell: pwsh
         run: |
           cd td/jnibuild
           cmake --build . --config Release --parallel 4
           
       - name: Install TDLib
+        shell: pwsh
         run: |
           cd td/jnibuild
           cmake --install . --config Release
 
       - name: Configure JNI Wrapper
+        shell: bash
         run: |
           cd td/example/java
-          mkdir build
+          mkdir -p build
           cd build
           
-          cmake -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DTd_DIR="${{ github.workspace }}/td/tdlib-install/lib/cmake/Td" `
-            -DJAVA_HOME="$env:JAVA_HOME" `
-            -DJAVA_INCLUDE_PATH="$env:JAVA_HOME/include" `
-            -DJAVA_AWT_LIBRARY="$env:JAVA_HOME/lib/jawt.lib" `
-            -DJAVA_JVM_LIBRARY="$env:JAVA_HOME/lib/jvm.lib" `
+          cmake -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTd_DIR="${{ github.workspace }}/td/example/java/td/lib/cmake/Td" \
+            -DJAVA_HOME="$JAVA_HOME_CMAKE" \
             ..
-          
-          echo "=== JNI Wrapper CMake configuration complete ==="
 
       - name: Build JNI Wrapper
+        shell: pwsh
         run: |
           cd td/example/java/build
           cmake --build . --config Release --target tdjni
 
       - name: Find and prepare artifacts
+        shell: pwsh
         run: |
           mkdir -p artifacts/windows-x64
           
@@ -192,7 +193,8 @@ jobs:
             cmake \
             gperf \
             libssl-dev \
-            zlib1g-dev
+            zlib1g-dev \
+            php-cli
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -210,37 +212,30 @@ jobs:
       - name: Configure TDLib with JNI
         run: |
           cd td
-          mkdir jnibuild
+          mkdir -p jnibuild
           cd jnibuild
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DTD_ENABLE_JNI=ON \
-            -DJAVA_HOME="$JAVA_HOME" \
-            -DCMAKE_INSTALL_PREFIX:PATH="../tdlib-install" \
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
             ..
 
-      - name: Build TDLib
+      - name: Build and Install TDLib
         run: |
           cd td/jnibuild
-          cmake --build . --parallel $(nproc)
-
-      - name: Install TDLib
-        run: |
-          cd td/jnibuild
-          cmake --install .
+          cmake --build . --target install --parallel $(nproc)
 
       - name: Configure JNI Wrapper
         run: |
           cd td/example/java
-          mkdir build
+          mkdir -p build
           cd build
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
-            -DTd_DIR="${{ github.workspace }}/td/tdlib-install/lib/cmake/Td" \
-            -DJAVA_HOME="$JAVA_HOME" \
+            -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
             ..
 
-      - name: Build JNI Wrapper (tdjni only)
+      - name: Build JNI Wrapper
         run: |
           cd td/example/java/build
           cmake --build . --target tdjni --parallel $(nproc)
@@ -355,7 +350,7 @@ jobs:
       - name: Configure TDLib for Android
         run: |
           cd td
-          mkdir build-android-${{ matrix.abi }}
+          mkdir -p build-android-${{ matrix.abi }}
           cd build-android-${{ matrix.abi }}
           
           OPENSSL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
@@ -371,11 +366,11 @@ jobs:
             -DOPENSSL_INCLUDE_DIR=$OPENSSL_DIR/include \
             -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_DIR/lib/libcrypto.a \
             -DOPENSSL_SSL_LIBRARY=$OPENSSL_DIR/lib/libssl.a \
-            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib-install-${{ matrix.abi }} \
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
             -GNinja \
             ..
 
-      - name: Build TDLib for Android
+      - name: Build and Install TDLib for Android
         run: |
           cd td/build-android-${{ matrix.abi }}
           ninja
@@ -384,7 +379,7 @@ jobs:
       - name: Configure JNI Wrapper for Android
         run: |
           cd td/example/java
-          mkdir build-android-${{ matrix.abi }}
+          mkdir -p build-android-${{ matrix.abi }}
           cd build-android-${{ matrix.abi }}
           
           cmake \
@@ -393,7 +388,7 @@ jobs:
             -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
-            -DTd_DIR=${{ github.workspace }}/td/tdlib-install-${{ matrix.abi }}/lib/cmake/Td \
+            -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
             -GNinja \
             ..
 
