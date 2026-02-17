@@ -76,10 +76,8 @@ jobs:
           java-version: '17'
 
       - name: Set JAVA_HOME with forward slashes
-        id: java-path
         shell: bash
         run: |
-          # Convert backslashes to forward slashes
           JAVA_HOME_FIXED=$(echo "$JAVA_HOME" | sed 's|\\|/|g')
           echo "JAVA_HOME_CMAKE=$JAVA_HOME_FIXED" >> $GITHUB_ENV
           echo "Java home: $JAVA_HOME_FIXED"
@@ -103,6 +101,25 @@ jobs:
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
           echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
+
+      - name: Patch CMakeLists.txt to skip javadoc
+        shell: bash
+        run: |
+          cd td/example/java
+          
+          # Backup original
+          cp CMakeLists.txt CMakeLists.txt.bak
+          
+          # Remove javadoc and build_java dependencies from tdjni target
+          sed -i 's/add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni generate_javadoc)//g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni build_java)//g' CMakeLists.txt
+          
+          # Also try pattern with different spacing
+          sed -i 's/add_dependencies(tdjni td_generate_java_api generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          
+          echo "=== Patched CMakeLists.txt ==="
+          grep -n "add_dependencies" CMakeLists.txt || true
 
       - name: Configure TDLib with JNI
         shell: bash
@@ -224,6 +241,33 @@ jobs:
         run: |
           cd td/jnibuild
           cmake --build . --target install --parallel $(nproc)
+
+      - name: Patch CMakeLists.txt to skip javadoc
+        run: |
+          cd td/example/java
+          
+          # Show original dependencies
+          echo "=== Original CMakeLists.txt dependencies ==="
+          grep -n "add_dependencies" CMakeLists.txt || true
+          
+          # Remove javadoc and build_java dependencies from tdjni target
+          # Handle various possible formats
+          sed -i 's/add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni td_generate_java_api generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni generate_javadoc)//g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni build_java)//g' CMakeLists.txt
+          
+          # If dependencies are on separate lines or in different format
+          sed -i '/generate_javadoc/d' CMakeLists.txt || true
+          sed -i '/build_java/d' CMakeLists.txt || true
+          
+          # Restore tdjni target definition if it was removed
+          if ! grep -q "add_library(tdjni" CMakeLists.txt; then
+            echo "Warning: tdjni target might have been affected"
+          fi
+          
+          echo "=== Patched CMakeLists.txt dependencies ==="
+          grep -n "add_dependencies\|tdjni" CMakeLists.txt || true
 
       - name: Configure JNI Wrapper
         run: |
@@ -375,6 +419,24 @@ jobs:
           cd td/build-android-${{ matrix.abi }}
           ninja
           ninja install
+
+      - name: Patch CMakeLists.txt to skip javadoc
+        run: |
+          cd td/example/java
+          
+          echo "=== Original CMakeLists.txt dependencies ==="
+          grep -n "add_dependencies" CMakeLists.txt || true
+          
+          # Remove javadoc and build_java dependencies
+          sed -i 's/add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni td_generate_java_api generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni generate_javadoc)//g' CMakeLists.txt
+          sed -i 's/add_dependencies(tdjni build_java)//g' CMakeLists.txt
+          sed -i '/generate_javadoc/d' CMakeLists.txt || true
+          sed -i '/build_java/d' CMakeLists.txt || true
+          
+          echo "=== Patched CMakeLists.txt dependencies ==="
+          grep -n "add_dependencies\|tdjni" CMakeLists.txt || true
 
       - name: Configure JNI Wrapper for Android
         run: |
