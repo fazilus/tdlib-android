@@ -19,12 +19,12 @@ on:
         type: boolean
         default: true
       build_javadoc:
-        description: 'Build Javadoc documentation'
+        description: 'Build Java files and documentation'
         required: true
         type: boolean
         default: false
       tdlib_commit:
-        description: 'TDLib commit/branch (empty = latest)'
+        description: 'Input TDLib commit/branch (empty = latest)'
         required: false
         default: ''
 
@@ -356,7 +356,9 @@ jobs:
             cmake \
             gperf \
             ninja-build \
-            php-cli
+            php-cli \
+            libssl-dev \
+            zlib1g-dev
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -378,6 +380,19 @@ jobs:
           git clone ${{ env.TDLIB_REPO }} td
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
+
+      - name: Build native generators (host build)
+        run: |
+          cd td
+          mkdir -p build-native
+          cd build-native
+          
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            ..
+          
+          # Build only the generators needed for cross-compilation
+          cmake --build . --target prepare_cross_compiling --parallel $(nproc)
 
       - name: Build OpenSSL for Android
         run: |
@@ -409,7 +424,7 @@ jobs:
           make -j $(nproc)
           make install_sw
 
-      - name: Configure TDLib for Android
+      - name: Configure TDLib for Android (cross-compile)
         run: |
           cd td
           mkdir -p build-android-${{ matrix.abi }}
@@ -576,7 +591,6 @@ jobs:
           cd td/example/java
           mkdir -p docs
           
-          # Generate Javadoc excluding Example.java
           javadoc \
             -d docs \
             -sourcepath . \
@@ -590,7 +604,7 @@ jobs:
             2>/dev/null || true
           
           if [ ! -f "docs/index.html" ]; then
-            echo "Javadoc generation had issues, creating minimal docs..."
+            echo "Creating minimal docs..."
             mkdir -p docs
             cat > docs/index.html << 'HTMLEOF'
           <!DOCTYPE html>
