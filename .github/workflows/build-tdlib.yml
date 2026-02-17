@@ -208,7 +208,7 @@ jobs:
           path: artifacts/windows-x64/tdjni.dll
 
   # ============================================
-  # Linux (Ubuntu 22.04) Build (Static)
+  # Linux (Ubuntu 22.04) Build (Dynamic)
   # ============================================
   build-linux:
     if: ${{ inputs.build_linux }}
@@ -223,6 +223,8 @@ jobs:
             build-essential \
             cmake \
             gperf \
+            libssl-dev \
+            zlib1g-dev \
             php-cli
 
       - name: Setup JDK
@@ -237,44 +239,14 @@ jobs:
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
 
-      - name: Build zlib (static)
-        run: |
-          wget -q https://zlib.net/zlib-1.3.1.tar.gz
-          tar -xzf zlib-1.3.1.tar.gz
-          cd zlib-1.3.1
-          
-          CFLAGS="-fPIC" ./configure --prefix=${{ github.workspace }}/zlib-static --static
-          make -j $(nproc)
-          make install
-
-      - name: Build OpenSSL (static)
-        run: |
-          wget -q https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
-          tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
-          cd openssl-${{ env.OPENSSL_VERSION }}
-          
-          ./Configure linux-x86_64 \
-            --prefix=${{ github.workspace }}/openssl-static \
-            -fPIC \
-            no-shared \
-            no-tests
-          
-          make -j $(nproc)
-          make install_sw
-
       - name: Configure TDLib with JNI
         run: |
           cd td
           mkdir -p jnibuild
           cd jnibuild
-          
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DTD_ENABLE_JNI=ON \
-            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-static \
-            -DOPENSSL_USE_STATIC_LIBS=TRUE \
-            -DZLIB_LIBRARY=${{ github.workspace }}/zlib-static/lib/libz.a \
-            -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-static/include \
             -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
             ..
 
@@ -318,14 +290,9 @@ jobs:
           cd td/example/java
           mkdir -p build
           cd build
-          
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
-            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-static \
-            -DOPENSSL_USE_STATIC_LIBS=TRUE \
-            -DZLIB_LIBRARY=${{ github.workspace }}/zlib-static/lib/libz.a \
-            -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-static/include \
             ..
 
       - name: Build JNI Wrapper
@@ -604,49 +571,26 @@ jobs:
             ..
           cmake --build . --target td_generate_java_api
 
-      - name: Generate Javadoc manually
+      - name: Generate Javadoc
         run: |
           cd td/example/java
-          
-          # Create output directory
           mkdir -p docs
           
-          # Generate Javadoc for TdApi and Client only (exclude Example)
+          # Generate Javadoc excluding Example.java
           javadoc \
             -d docs \
             -sourcepath . \
-            -subpackages org.drinkless.tdlib \
-            -exclude org.drinkless.tdlib.example \
             -windowtitle "TDLib Java API" \
             -doctitle "TDLib Java API Documentation" \
             -header "TDLib JNI" \
+            -Xdoclint:none \
             -quiet \
             org/drinkless/tdlib/TdApi.java \
             org/drinkless/tdlib/Client.java \
-            || true
+            2>/dev/null || true
           
-          # Check if docs were generated
-          if [ -f "docs/index.html" ]; then
-            echo "Javadoc generated successfully"
-            ls -la docs/
-          else
-            echo "Warning: Javadoc generation may have had issues, trying alternative approach..."
-            
-            # Alternative: generate for all files but ignore errors
-            javadoc \
-              -d docs \
-              -sourcepath . \
-              -windowtitle "TDLib Java API" \
-              -doctitle "TDLib Java API Documentation" \
-              -Xdoclint:none \
-              org/drinkless/tdlib/TdApi.java \
-              org/drinkless/tdlib/Client.java \
-              2>/dev/null || true
-          fi
-          
-          # Create a simple index if javadoc completely failed
           if [ ! -f "docs/index.html" ]; then
-            echo "Creating minimal documentation..."
+            echo "Javadoc generation had issues, creating minimal docs..."
             mkdir -p docs
             cat > docs/index.html << 'HTMLEOF'
           <!DOCTYPE html>
@@ -654,31 +598,22 @@ jobs:
           <head><title>TDLib Java API</title></head>
           <body>
           <h1>TDLib Java API</h1>
-          <p>Javadoc generation encountered issues. Please refer to the source files:</p>
-          <ul>
-            <li>TdApi.java - Main API classes</li>
-            <li>Client.java - TDLib client wrapper</li>
-          </ul>
+          <p>Please refer to the source files: TdApi.java and Client.java</p>
           </body>
           </html>
           HTMLEOF
           fi
 
-      - name: Copy Java source files
-        run: |
-          cd td/example/java
-          mkdir -p java-sources/org/drinkless/tdlib
-          cp org/drinkless/tdlib/TdApi.java java-sources/org/drinkless/tdlib/
-          cp org/drinkless/tdlib/Client.java java-sources/org/drinkless/tdlib/
-
       - name: Prepare artifacts
         run: |
           mkdir -p artifacts/javadoc
-          cp -r td/example/java/docs/* artifacts/javadoc/ || true
-          cp -r td/example/java/java-sources artifacts/ || true
+          mkdir -p artifacts/java-sources/org/drinkless/tdlib
           
-          # Add version info
-          cat > artifacts/javadoc/VERSION.txt << EOF
+          cp -r td/example/java/docs/* artifacts/javadoc/ || true
+          cp td/example/java/org/drinkless/tdlib/TdApi.java artifacts/java-sources/org/drinkless/tdlib/
+          cp td/example/java/org/drinkless/tdlib/Client.java artifacts/java-sources/org/drinkless/tdlib/
+          
+          cat > artifacts/VERSION.txt << EOF
           TDLib Javadoc
           TDLib commit: ${{ needs.get-tdlib-version.outputs.commit_sha }}
           Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
@@ -688,9 +623,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tdlib-javadoc-${{ needs.get-tdlib-version.outputs.commit_short }}
-          path: |
-            artifacts/javadoc/
-            artifacts/java-sources/
+          path: artifacts/
 
   # ============================================
   # Combine all artifacts
@@ -734,8 +667,10 @@ jobs:
           [ -d "all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT/* release/android/x86_64/ || true
           
           # Copy javadoc
-          [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT/javadoc" ] && cp -r all-artifacts/tdlib-javadoc-$COMMIT_SHORT/javadoc/* release/javadoc/ || true
-          [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT/java-sources" ] && cp -r all-artifacts/tdlib-javadoc-$COMMIT_SHORT/java-sources/* release/java-sources/ || true
+          if [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT" ]; then
+            [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT/javadoc" ] && cp -r all-artifacts/tdlib-javadoc-$COMMIT_SHORT/javadoc/* release/javadoc/ || true
+            [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT/java-sources" ] && cp -r all-artifacts/tdlib-javadoc-$COMMIT_SHORT/java-sources/* release/java-sources/ || true
+          fi
           
           # Remove empty directories
           find release -type d -empty -delete 2>/dev/null || true
@@ -748,17 +683,13 @@ jobs:
           TDLib commit (short): $COMMIT_SHORT
           Build date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           
-          Platforms (all statically linked):
-          - Windows x64
-          - Linux x64 (Ubuntu 22.04)
-          - Android armeabi-v7a (API 21+)
-          - Android arm64-v8a (API 21+)
-          - Android x86 (API 21+)
-          - Android x86_64 (API 21+)
-          
-          Static dependencies included:
-          - OpenSSL ${{ env.OPENSSL_VERSION }}
-          - zlib 1.3.1
+          Platforms:
+          - Windows x64 (static linking)
+          - Linux x64 (dynamic linking, requires libssl, libcrypto, zlib)
+          - Android armeabi-v7a (API 21+, static linking)
+          - Android arm64-v8a (API 21+, static linking)
+          - Android x86 (API 21+, static linking)
+          - Android x86_64 (API 21+, static linking)
           EOL
           
           echo "=== Build artifacts ==="
