@@ -107,19 +107,41 @@ jobs:
         run: |
           cd td/example/java
           
-          # Backup original
-          cp CMakeLists.txt CMakeLists.txt.bak
+          echo "=== Original CMakeLists.txt ==="
+          cat CMakeLists.txt
+          echo "=== End original ==="
           
-          # Remove javadoc and build_java dependencies from tdjni target
-          sed -i 's/add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni generate_javadoc)//g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni build_java)//g' CMakeLists.txt
+          # Create patched version using Python for reliability
+          python3 << 'EOF'
+          import re
           
-          # Also try pattern with different spacing
-          sed -i 's/add_dependencies(tdjni td_generate_java_api generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
+          with open('CMakeLists.txt', 'r') as f:
+              content = f.read()
+          
+          # Remove build_java and generate_javadoc from add_dependencies for tdjni
+          # Pattern: add_dependencies(tdjni ... build_java ... generate_javadoc ...)
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          # Also handle if they're in different order or separate calls
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          with open('CMakeLists.txt', 'w') as f:
+              f.write(content)
+          
+          print("Patched successfully")
+          EOF
           
           echo "=== Patched CMakeLists.txt ==="
-          grep -n "add_dependencies" CMakeLists.txt || true
+          cat CMakeLists.txt
+          echo "=== End patched ==="
 
       - name: Configure TDLib with JNI
         shell: bash
@@ -246,28 +268,50 @@ jobs:
         run: |
           cd td/example/java
           
-          # Show original dependencies
-          echo "=== Original CMakeLists.txt dependencies ==="
-          grep -n "add_dependencies" CMakeLists.txt || true
+          echo "=== Original CMakeLists.txt ==="
+          cat CMakeLists.txt
+          echo ""
+          echo "=== End original ==="
           
-          # Remove javadoc and build_java dependencies from tdjni target
-          # Handle various possible formats
-          sed -i 's/add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni td_generate_java_api generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni generate_javadoc)//g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni build_java)//g' CMakeLists.txt
+          # Create patched version using Python for reliability
+          python3 << 'EOF'
+          import re
           
-          # If dependencies are on separate lines or in different format
-          sed -i '/generate_javadoc/d' CMakeLists.txt || true
-          sed -i '/build_java/d' CMakeLists.txt || true
+          with open('CMakeLists.txt', 'r') as f:
+              content = f.read()
           
-          # Restore tdjni target definition if it was removed
-          if ! grep -q "add_library(tdjni" CMakeLists.txt; then
-            echo "Warning: tdjni target might have been affected"
-          fi
+          # Remove build_java and generate_javadoc from add_dependencies for tdjni
+          # Handle: add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
           
-          echo "=== Patched CMakeLists.txt dependencies ==="
-          grep -n "add_dependencies\|tdjni" CMakeLists.txt || true
+          # Handle: add_dependencies(tdjni td_generate_java_api generate_javadoc build_java)
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          # Handle any other order with these dependencies
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          with open('CMakeLists.txt', 'w') as f:
+              f.write(content)
+          
+          print("Patched successfully")
+          EOF
+          
+          echo "=== Patched CMakeLists.txt ==="
+          cat CMakeLists.txt
+          echo ""
+          echo "=== End patched ==="
 
       - name: Configure JNI Wrapper
         run: |
@@ -424,19 +468,37 @@ jobs:
         run: |
           cd td/example/java
           
-          echo "=== Original CMakeLists.txt dependencies ==="
-          grep -n "add_dependencies" CMakeLists.txt || true
+          # Create patched version using Python for reliability
+          python3 << 'EOF'
+          import re
           
-          # Remove javadoc and build_java dependencies
-          sed -i 's/add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni td_generate_java_api generate_javadoc)/add_dependencies(tdjni td_generate_java_api)/g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni generate_javadoc)//g' CMakeLists.txt
-          sed -i 's/add_dependencies(tdjni build_java)//g' CMakeLists.txt
-          sed -i '/generate_javadoc/d' CMakeLists.txt || true
-          sed -i '/build_java/d' CMakeLists.txt || true
+          with open('CMakeLists.txt', 'r') as f:
+              content = f.read()
           
-          echo "=== Patched CMakeLists.txt dependencies ==="
-          grep -n "add_dependencies\|tdjni" CMakeLists.txt || true
+          # Remove build_java and generate_javadoc from add_dependencies for tdjni
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          with open('CMakeLists.txt', 'w') as f:
+              f.write(content)
+          
+          print("Patched successfully")
+          EOF
 
       - name: Configure JNI Wrapper for Android
         run: |
