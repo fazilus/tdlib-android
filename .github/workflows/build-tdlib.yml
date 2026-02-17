@@ -19,7 +19,7 @@ on:
         type: boolean
         default: true
       build_javadoc:
-        description: 'Build Javadoc documentation'
+        description: 'Build Java and documentation'
         required: true
         type: boolean
         default: false
@@ -452,54 +452,73 @@ jobs:
           ninja
           ninja install
 
-      - name: Patch CMakeLists.txt for Android (skip javadoc and fix JNI)
+      - name: Create custom CMakeLists.txt for Android JNI
         run: |
           cd td/example/java
           
-          python3 << 'EOF'
-          import re
+          # Backup original
+          cp CMakeLists.txt CMakeLists.txt.original
           
-          with open('CMakeLists.txt', 'r') as f:
-              content = f.read()
+          # Create new CMakeLists.txt for Android
+          cat > CMakeLists.txt << 'CMAKEFILE'
+          cmake_minimum_required(VERSION 3.4 FATAL_ERROR)
+          project(TdJavaExample VERSION 1.0 LANGUAGES CXX)
           
-          # Remove build_java and generate_javadoc dependencies
-          content = re.sub(
-              r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
-              'add_dependencies(tdjni td_generate_java_api)',
-              content
-          )
-          content = re.sub(
-              r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
-              'add_dependencies(tdjni td_generate_java_api)',
-              content
-          )
-          content = re.sub(
-              r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
-              'add_dependencies(tdjni td_generate_java_api)',
-              content
-          )
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
           
-          # Replace find_package(JNI REQUIRED) with manual JNI setup for Android
-          content = re.sub(
-              r'find_package\(JNI REQUIRED\)',
-              '''# JNI setup for Android cross-compilation
+          # For Android, we only need JNI headers, not JVM
           if(ANDROID)
-            set(JNI_INCLUDE_DIRS "$ENV{JAVA_HOME}/include" "$ENV{JAVA_HOME}/include/linux")
-            set(JNI_FOUND TRUE)
+            # Use JNI headers from host JDK
+            if(DEFINED ENV{JAVA_HOME})
+              set(JNI_INCLUDE_DIRS "$ENV{JAVA_HOME}/include" "$ENV{JAVA_HOME}/include/linux")
+            else()
+              message(FATAL_ERROR "JAVA_HOME not set")
+            endif()
           else()
             find_package(JNI REQUIRED)
-          endif()''',
-              content
+          endif()
+          
+          find_package(Td REQUIRED)
+          
+          # Source files
+          if(NOT DEFINED TD_API_JAVA_PACKAGE)
+            set(TD_API_JAVA_PACKAGE "org/drinkless/tdlib")
+          endif()
+          
+          set(TD_API_TLO_PATH ${CMAKE_CURRENT_SOURCE_DIR}/td/bin/td/generate/scheme/td_api.tlo)
+          set(TD_API_TL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/td/bin/td/generate/scheme/td_api.tl)
+          set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+          
+          set(TD_API_JAVA_PATH ${JAVA_OUTPUT_DIR}/${TD_API_JAVA_PACKAGE}/TdApi.java)
+          
+          # Generate Java API
+          add_custom_command(
+            OUTPUT ${TD_API_JAVA_PATH}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${JAVA_OUTPUT_DIR}/${TD_API_JAVA_PACKAGE}
+            COMMAND ${PHP_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/td/bin/td/generate/JavadocTlDocumentationGenerator.php ${TD_API_TLO_PATH} ${TD_API_JAVA_PATH} ${TD_API_JAVA_PACKAGE}
+            DEPENDS ${TD_API_TLO_PATH} ${TD_API_TL_PATH}
+            COMMENT "Generating Java TdApi"
+          )
+          add_custom_target(td_generate_java_api DEPENDS ${TD_API_JAVA_PATH})
+          
+          # tdjni library
+          add_library(tdjni SHARED
+            td_jni.cpp
           )
           
-          with open('CMakeLists.txt', 'w') as f:
-              f.write(content)
+          target_include_directories(tdjni PRIVATE ${JNI_INCLUDE_DIRS})
+          target_link_libraries(tdjni PRIVATE Td::TdJsonStatic)
           
-          print("CMakeLists.txt patched for Android")
-          EOF
+          add_dependencies(tdjni td_generate_java_api)
           
-          echo "=== Patched CMakeLists.txt ==="
-          head -30 CMakeLists.txt
+          set_target_properties(tdjni PROPERTIES
+            OUTPUT_NAME "tdjni"
+          )
+          CMAKEFILE
+          
+          echo "=== New CMakeLists.txt ==="
+          cat CMakeLists.txt
 
       - name: Configure JNI Wrapper for Android
         run: |
@@ -514,7 +533,7 @@ jobs:
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
             -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
-            -DJAVA_HOME=$JAVA_HOME \
+            -DPHP_EXECUTABLE=/usr/bin/php \
             -GNinja \
             ..
 
