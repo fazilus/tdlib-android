@@ -18,6 +18,11 @@ on:
         required: true
         type: boolean
         default: true
+      build_javadoc:
+        description: 'Build Javadoc documentation'
+        required: true
+        type: boolean
+        default: false
       tdlib_commit:
         description: 'TDLib commit/branch (empty = latest)'
         required: false
@@ -25,6 +30,7 @@ on:
 
 env:
   TDLIB_REPO: https://github.com/tdlib/td.git
+  OPENSSL_VERSION: '3.0.12'
 
 jobs:
   # ============================================
@@ -56,7 +62,7 @@ jobs:
           echo "Using TDLib commit: $COMMIT_SHA ($COMMIT_SHORT)"
 
   # ============================================
-  # Windows x64 Build
+  # Windows x64 Build (Static)
   # ============================================
   build-windows:
     if: ${{ inputs.build_windows }}
@@ -80,19 +86,18 @@ jobs:
         run: |
           JAVA_HOME_FIXED=$(echo "$JAVA_HOME" | sed 's|\\|/|g')
           echo "JAVA_HOME_CMAKE=$JAVA_HOME_FIXED" >> $GITHUB_ENV
-          echo "Java home: $JAVA_HOME_FIXED"
 
       - name: Install gperf
         run: choco install gperf -y
 
-      - name: Install vcpkg and dependencies
+      - name: Install vcpkg and dependencies (static)
         shell: pwsh
         run: |
           cd ${{ github.workspace }}
           git clone https://github.com/Microsoft/vcpkg.git
           cd vcpkg
           .\bootstrap-vcpkg.bat
-          .\vcpkg install openssl:x64-windows zlib:x64-windows
+          .\vcpkg install openssl:x64-windows-static zlib:x64-windows-static
 
       - name: Clone TDLib
         shell: bash
@@ -100,48 +105,37 @@ jobs:
           git clone ${{ env.TDLIB_REPO }} td
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
-          echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
 
       - name: Patch CMakeLists.txt to skip javadoc
         shell: bash
         run: |
           cd td/example/java
           
-          echo "=== Original CMakeLists.txt ==="
-          cat CMakeLists.txt
-          echo "=== End original ==="
-          
-          # Create patched version using Python for reliability
           python3 << 'EOF'
           import re
           
           with open('CMakeLists.txt', 'r') as f:
               content = f.read()
           
-          # Remove build_java and generate_javadoc from add_dependencies for tdjni
-          # Pattern: add_dependencies(tdjni ... build_java ... generate_javadoc ...)
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
               'add_dependencies(tdjni td_generate_java_api)',
               content
           )
-          
-          # Also handle if they're in different order or separate calls
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
               'add_dependencies(tdjni td_generate_java_api)',
               content
           )
           
           with open('CMakeLists.txt', 'w') as f:
               f.write(content)
-          
-          print("Patched successfully")
           EOF
-          
-          echo "=== Patched CMakeLists.txt ==="
-          cat CMakeLists.txt
-          echo "=== End patched ==="
 
       - name: Configure TDLib with JNI
         shell: bash
@@ -153,7 +147,7 @@ jobs:
           cmake -G "Visual Studio 17 2022" -A x64 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-            -DVCPKG_TARGET_TRIPLET=x64-windows \
+            -DVCPKG_TARGET_TRIPLET=x64-windows-static \
             -DTD_ENABLE_JNI=ON \
             -DJAVA_HOME="$JAVA_HOME_CMAKE" \
             -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
@@ -195,17 +189,15 @@ jobs:
         run: |
           mkdir -p artifacts/windows-x64
           
-          echo "=== Searching for tdjni.dll ==="
           $dllFiles = Get-ChildItem -Path td -Recurse -Filter "tdjni.dll" -ErrorAction SilentlyContinue
           
           if ($dllFiles) {
-            foreach ($dll in $dllFiles) {
-              Write-Host "Found: $($dll.FullName)"
-            }
             Copy-Item $dllFiles[0].FullName -Destination artifacts/windows-x64/
+            
+            Write-Host "=== DLL Dependencies ==="
+            dumpbin /dependents $dllFiles[0].FullName
           } else {
-            Write-Host "tdjni.dll not found! All DLLs:"
-            Get-ChildItem -Path td -Recurse -Filter "*.dll" | ForEach-Object { Write-Host $_.FullName }
+            Write-Host "tdjni.dll not found!"
             exit 1
           }
 
@@ -216,7 +208,7 @@ jobs:
           path: artifacts/windows-x64/tdjni.dll
 
   # ============================================
-  # Linux (Ubuntu 22.04) Build
+  # Linux (Ubuntu 22.04) Build (Static)
   # ============================================
   build-linux:
     if: ${{ inputs.build_linux }}
@@ -231,8 +223,6 @@ jobs:
             build-essential \
             cmake \
             gperf \
-            libssl-dev \
-            zlib1g-dev \
             php-cli
 
       - name: Setup JDK
@@ -246,16 +236,45 @@ jobs:
           git clone ${{ env.TDLIB_REPO }} td
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
-          echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
+
+      - name: Build zlib (static)
+        run: |
+          wget -q https://zlib.net/zlib-1.3.1.tar.gz
+          tar -xzf zlib-1.3.1.tar.gz
+          cd zlib-1.3.1
+          
+          CFLAGS="-fPIC" ./configure --prefix=${{ github.workspace }}/zlib-static --static
+          make -j $(nproc)
+          make install
+
+      - name: Build OpenSSL (static)
+        run: |
+          wget -q https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          cd openssl-${{ env.OPENSSL_VERSION }}
+          
+          ./Configure linux-x86_64 \
+            --prefix=${{ github.workspace }}/openssl-static \
+            -fPIC \
+            no-shared \
+            no-tests
+          
+          make -j $(nproc)
+          make install_sw
 
       - name: Configure TDLib with JNI
         run: |
           cd td
           mkdir -p jnibuild
           cd jnibuild
+          
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DTD_ENABLE_JNI=ON \
+            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-static \
+            -DOPENSSL_USE_STATIC_LIBS=TRUE \
+            -DZLIB_LIBRARY=${{ github.workspace }}/zlib-static/lib/libz.a \
+            -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-static/include \
             -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
             ..
 
@@ -268,34 +287,22 @@ jobs:
         run: |
           cd td/example/java
           
-          echo "=== Original CMakeLists.txt ==="
-          cat CMakeLists.txt
-          echo ""
-          echo "=== End original ==="
-          
-          # Create patched version using Python for reliability
           python3 << 'EOF'
           import re
           
           with open('CMakeLists.txt', 'r') as f:
               content = f.read()
           
-          # Remove build_java and generate_javadoc from add_dependencies for tdjni
-          # Handle: add_dependencies(tdjni td_generate_java_api build_java generate_javadoc)
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
               'add_dependencies(tdjni td_generate_java_api)',
               content
           )
-          
-          # Handle: add_dependencies(tdjni td_generate_java_api generate_javadoc build_java)
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
               'add_dependencies(tdjni td_generate_java_api)',
               content
           )
-          
-          # Handle any other order with these dependencies
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
               'add_dependencies(tdjni td_generate_java_api)',
@@ -304,23 +311,21 @@ jobs:
           
           with open('CMakeLists.txt', 'w') as f:
               f.write(content)
-          
-          print("Patched successfully")
           EOF
-          
-          echo "=== Patched CMakeLists.txt ==="
-          cat CMakeLists.txt
-          echo ""
-          echo "=== End patched ==="
 
       - name: Configure JNI Wrapper
         run: |
           cd td/example/java
           mkdir -p build
           cd build
+          
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
+            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-static \
+            -DOPENSSL_USE_STATIC_LIBS=TRUE \
+            -DZLIB_LIBRARY=${{ github.workspace }}/zlib-static/lib/libz.a \
+            -DZLIB_INCLUDE_DIR=${{ github.workspace }}/zlib-static/include \
             ..
 
       - name: Build JNI Wrapper
@@ -332,15 +337,18 @@ jobs:
         run: |
           mkdir -p artifacts/linux-x64
           
-          echo "=== Searching for libtdjni.so ==="
           SO_FILE=$(find td -name "libtdjni.so" -type f 2>/dev/null | head -1)
           
           if [ -n "$SO_FILE" ]; then
-            echo "Found: $SO_FILE"
             cp "$SO_FILE" artifacts/linux-x64/
+            
+            echo "=== Library Dependencies ==="
+            ldd "$SO_FILE"
+            
+            echo "=== File size ==="
+            ls -lh "$SO_FILE"
           else
-            echo "libtdjni.so not found! All .so files:"
-            find td -name "*.so" -type f
+            echo "libtdjni.so not found!"
             exit 1
           fi
 
@@ -403,14 +411,13 @@ jobs:
           git clone ${{ env.TDLIB_REPO }} td
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
-          echo "Checked out TDLib at commit: $(git rev-parse HEAD)"
 
       - name: Build OpenSSL for Android
         run: |
-          wget -q https://www.openssl.org/source/openssl-3.0.12.tar.gz
-          tar -xzf openssl-3.0.12.tar.gz
+          wget -q https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
           
-          OPENSSL_DIR=${{ github.workspace }}/openssl-3.0.12
+          OPENSSL_DIR=${{ github.workspace }}/openssl-${{ env.OPENSSL_VERSION }}
           INSTALL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
           mkdir -p $INSTALL_DIR
           
@@ -468,26 +475,22 @@ jobs:
         run: |
           cd td/example/java
           
-          # Create patched version using Python for reliability
           python3 << 'EOF'
           import re
           
           with open('CMakeLists.txt', 'r') as f:
               content = f.read()
           
-          # Remove build_java and generate_javadoc from add_dependencies for tdjni
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
               'add_dependencies(tdjni td_generate_java_api)',
               content
           )
-          
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
               'add_dependencies(tdjni td_generate_java_api)',
               content
           )
-          
           content = re.sub(
               r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
               'add_dependencies(tdjni td_generate_java_api)',
@@ -496,8 +499,6 @@ jobs:
           
           with open('CMakeLists.txt', 'w') as f:
               f.write(content)
-          
-          print("Patched successfully")
           EOF
 
       - name: Configure JNI Wrapper for Android
@@ -525,15 +526,16 @@ jobs:
         run: |
           mkdir -p artifacts/android/${{ matrix.abi }}
           
-          echo "=== Searching for libtdjni.so ==="
           SO_FILE=$(find td -name "libtdjni.so" -type f 2>/dev/null | head -1)
           
           if [ -n "$SO_FILE" ]; then
-            echo "Found: $SO_FILE"
             cp "$SO_FILE" artifacts/android/${{ matrix.abi }}/
+            
+            echo "=== File info ==="
+            file "$SO_FILE"
+            ls -lh "$SO_FILE"
           else
-            echo "libtdjni.so not found! All .so files:"
-            find td -name "*.so" -type f
+            echo "libtdjni.so not found!"
             exit 1
           fi
 
@@ -544,12 +546,164 @@ jobs:
           path: artifacts/android/${{ matrix.abi }}/libtdjni.so
 
   # ============================================
+  # Build Javadoc Documentation
+  # ============================================
+  build-javadoc:
+    if: ${{ inputs.build_javadoc }}
+    needs: get-tdlib-version
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            gperf \
+            libssl-dev \
+            zlib1g-dev \
+            php-cli
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Clone TDLib
+        run: |
+          git clone ${{ env.TDLIB_REPO }} td
+          cd td
+          git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
+
+      - name: Configure TDLib with JNI
+        run: |
+          cd td
+          mkdir -p jnibuild
+          cd jnibuild
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTD_ENABLE_JNI=ON \
+            -DCMAKE_INSTALL_PREFIX:PATH=../example/java/td \
+            ..
+
+      - name: Build and Install TDLib
+        run: |
+          cd td/jnibuild
+          cmake --build . --target install --parallel $(nproc)
+
+      - name: Generate Java API
+        run: |
+          cd td/example/java
+          mkdir -p build
+          cd build
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTd_DIR=${{ github.workspace }}/td/example/java/td/lib/cmake/Td \
+            ..
+          cmake --build . --target td_generate_java_api
+
+      - name: Generate Javadoc manually
+        run: |
+          cd td/example/java
+          
+          # Create output directory
+          mkdir -p docs
+          
+          # Generate Javadoc for TdApi and Client only (exclude Example)
+          javadoc \
+            -d docs \
+            -sourcepath . \
+            -subpackages org.drinkless.tdlib \
+            -exclude org.drinkless.tdlib.example \
+            -windowtitle "TDLib Java API" \
+            -doctitle "TDLib Java API Documentation" \
+            -header "TDLib JNI" \
+            -quiet \
+            org/drinkless/tdlib/TdApi.java \
+            org/drinkless/tdlib/Client.java \
+            || true
+          
+          # Check if docs were generated
+          if [ -f "docs/index.html" ]; then
+            echo "Javadoc generated successfully"
+            ls -la docs/
+          else
+            echo "Warning: Javadoc generation may have had issues, trying alternative approach..."
+            
+            # Alternative: generate for all files but ignore errors
+            javadoc \
+              -d docs \
+              -sourcepath . \
+              -windowtitle "TDLib Java API" \
+              -doctitle "TDLib Java API Documentation" \
+              -Xdoclint:none \
+              org/drinkless/tdlib/TdApi.java \
+              org/drinkless/tdlib/Client.java \
+              2>/dev/null || true
+          fi
+          
+          # Create a simple index if javadoc completely failed
+          if [ ! -f "docs/index.html" ]; then
+            echo "Creating minimal documentation..."
+            mkdir -p docs
+            cat > docs/index.html << 'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+          <head><title>TDLib Java API</title></head>
+          <body>
+          <h1>TDLib Java API</h1>
+          <p>Javadoc generation encountered issues. Please refer to the source files:</p>
+          <ul>
+            <li>TdApi.java - Main API classes</li>
+            <li>Client.java - TDLib client wrapper</li>
+          </ul>
+          </body>
+          </html>
+          HTMLEOF
+          fi
+
+      - name: Copy Java source files
+        run: |
+          cd td/example/java
+          mkdir -p java-sources/org/drinkless/tdlib
+          cp org/drinkless/tdlib/TdApi.java java-sources/org/drinkless/tdlib/
+          cp org/drinkless/tdlib/Client.java java-sources/org/drinkless/tdlib/
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p artifacts/javadoc
+          cp -r td/example/java/docs/* artifacts/javadoc/ || true
+          cp -r td/example/java/java-sources artifacts/ || true
+          
+          # Add version info
+          cat > artifacts/javadoc/VERSION.txt << EOF
+          TDLib Javadoc
+          TDLib commit: ${{ needs.get-tdlib-version.outputs.commit_sha }}
+          Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          EOF
+
+      - name: Upload Javadoc artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-javadoc-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: |
+            artifacts/javadoc/
+            artifacts/java-sources/
+
+  # ============================================
   # Combine all artifacts
   # ============================================
   combine-artifacts:
     runs-on: ubuntu-latest
-    needs: [get-tdlib-version, build-windows, build-linux, build-android]
-    if: always() && (needs.build-windows.result == 'success' || needs.build-linux.result == 'success' || needs.build-android.result == 'success')
+    needs: [get-tdlib-version, build-windows, build-linux, build-android, build-javadoc]
+    if: |
+      always() && 
+      (needs.build-windows.result == 'success' || 
+       needs.build-linux.result == 'success' || 
+       needs.build-android.result == 'success' ||
+       needs.build-javadoc.result == 'success')
     
     steps:
       - name: Download all artifacts
@@ -560,6 +714,7 @@ jobs:
       - name: Organize artifacts
         run: |
           COMMIT_SHORT=${{ needs.get-tdlib-version.outputs.commit_short }}
+          COMMIT_FULL=${{ needs.get-tdlib-version.outputs.commit_sha }}
           
           mkdir -p release/windows-x64
           mkdir -p release/linux-x64
@@ -567,7 +722,10 @@ jobs:
           mkdir -p release/android/arm64-v8a
           mkdir -p release/android/x86
           mkdir -p release/android/x86_64
+          mkdir -p release/javadoc
+          mkdir -p release/java-sources
           
+          # Copy binaries
           [ -d "all-artifacts/tdlib-jni-windows-x64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-windows-x64-$COMMIT_SHORT/* release/windows-x64/ || true
           [ -d "all-artifacts/tdlib-jni-linux-x64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-linux-x64-$COMMIT_SHORT/* release/linux-x64/ || true
           [ -d "all-artifacts/tdlib-jni-android-armeabi-v7a-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-armeabi-v7a-$COMMIT_SHORT/* release/android/armeabi-v7a/ || true
@@ -575,8 +733,33 @@ jobs:
           [ -d "all-artifacts/tdlib-jni-android-x86-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86-$COMMIT_SHORT/* release/android/x86/ || true
           [ -d "all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT" ] && cp all-artifacts/tdlib-jni-android-x86_64-$COMMIT_SHORT/* release/android/x86_64/ || true
           
-          echo "TDLib commit: ${{ needs.get-tdlib-version.outputs.commit_sha }}" > release/VERSION.txt
-          echo "Build date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> release/VERSION.txt
+          # Copy javadoc
+          [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT/javadoc" ] && cp -r all-artifacts/tdlib-javadoc-$COMMIT_SHORT/javadoc/* release/javadoc/ || true
+          [ -d "all-artifacts/tdlib-javadoc-$COMMIT_SHORT/java-sources" ] && cp -r all-artifacts/tdlib-javadoc-$COMMIT_SHORT/java-sources/* release/java-sources/ || true
+          
+          # Remove empty directories
+          find release -type d -empty -delete 2>/dev/null || true
+          
+          # Create VERSION.txt
+          cat > release/VERSION.txt << EOL
+          TDLib JNI Build Information
+          ===========================
+          TDLib commit: $COMMIT_FULL
+          TDLib commit (short): $COMMIT_SHORT
+          Build date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          Platforms (all statically linked):
+          - Windows x64
+          - Linux x64 (Ubuntu 22.04)
+          - Android armeabi-v7a (API 21+)
+          - Android arm64-v8a (API 21+)
+          - Android x86 (API 21+)
+          - Android x86_64 (API 21+)
+          
+          Static dependencies included:
+          - OpenSSL ${{ env.OPENSSL_VERSION }}
+          - zlib 1.3.1
+          EOL
           
           echo "=== Build artifacts ==="
           find release -type f -ls
