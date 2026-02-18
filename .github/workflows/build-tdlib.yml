@@ -30,7 +30,6 @@ on:
 
 env:
   TDLIB_REPO: https://github.com/tdlib/td.git
-  OPENSSL_VERSION: '3.0.12'
 
 jobs:
   # ============================================
@@ -326,26 +325,12 @@ jobs:
           path: artifacts/linux-x64/libtdjni.so
 
   # ============================================
-  # Android Build (all architectures)
+  # Android Build (using official script)
   # ============================================
   build-android:
     if: ${{ inputs.build_android }}
     needs: get-tdlib-version
     runs-on: ubuntu-22.04
-    
-    strategy:
-      fail-fast: false
-      matrix:
-        abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
-        include:
-          - abi: armeabi-v7a
-            api_level: 21
-          - abi: arm64-v8a
-            api_level: 21
-          - abi: x86
-            api_level: 21
-          - abi: x86_64
-            api_level: 21
 
     steps:
       - name: Install dependencies
@@ -369,11 +354,12 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK
+      - name: Install Android NDK and CMake
         run: |
-          sdkmanager --install "ndk;26.1.10909125"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          sdkmanager --install "ndk;26.3.11295956" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11295956" >> $GITHUB_ENV
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11295956" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11295956" >> $GITHUB_ENV
 
       - name: Clone TDLib
         run: |
@@ -381,173 +367,87 @@ jobs:
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
 
-      - name: Build native TDLib (for code generation)
+      - name: Build TDLib for Android using official script
         run: |
-          cd td
-          mkdir -p build-native
-          cd build-native
+          cd td/example/android
           
-          cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DTD_ENABLE_JNI=ON \
-            ..
+          # Show script content for debugging
+          echo "=== build-tdlib.sh content ==="
+          head -100 build-tdlib.sh
           
-          cmake --build . --target prepare_cross_compiling --parallel $(nproc)
-
-      - name: Build OpenSSL for Android
-        run: |
-          wget -q https://www.openssl.org/source/openssl-${{ env.OPENSSL_VERSION }}.tar.gz
-          tar -xzf openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+          # Make script executable
+          chmod +x build-tdlib.sh
           
-          OPENSSL_DIR=${{ github.workspace }}/openssl-${{ env.OPENSSL_VERSION }}
-          INSTALL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
-          mkdir -p $INSTALL_DIR
+          # Run the official build script
+          ./build-tdlib.sh
           
-          cd $OPENSSL_DIR
-          
-          case "${{ matrix.abi }}" in
-            armeabi-v7a) ANDROID_ARCH=android-arm ;;
-            arm64-v8a)   ANDROID_ARCH=android-arm64 ;;
-            x86)         ANDROID_ARCH=android-x86 ;;
-            x86_64)      ANDROID_ARCH=android-x86_64 ;;
-          esac
-          
-          export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
-          export ANDROID_NDK_ROOT=$ANDROID_NDK_HOME
-          
-          ./Configure $ANDROID_ARCH \
-            -D__ANDROID_API__=${{ matrix.api_level }} \
-            --prefix=$INSTALL_DIR \
-            no-shared \
-            no-tests
-          
-          make -j $(nproc)
-          make install_sw
-
-      - name: Build TDLib for Android
-        run: |
-          cd td
-          mkdir -p build-android-${{ matrix.abi }}
-          cd build-android-${{ matrix.abi }}
-          
-          OPENSSL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
-          
-          cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=${{ matrix.abi }} \
-            -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
-            -DANDROID_STL=c++_static \
-            -DTD_ENABLE_JNI=ON \
-            -DJAVA_INCLUDE_PATH=$JAVA_HOME/include \
-            -DJAVA_INCLUDE_PATH2=$JAVA_HOME/include/linux \
-            -DJAVA_AWT_LIBRARY=NotNeeded \
-            -DJAVA_JVM_LIBRARY=NotNeeded \
-            -DJAVA_AWT_INCLUDE_PATH=$JAVA_HOME/include \
-            -DOPENSSL_ROOT_DIR=$OPENSSL_DIR \
-            -DOPENSSL_INCLUDE_DIR=$OPENSSL_DIR/include \
-            -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_DIR/lib/libcrypto.a \
-            -DOPENSSL_SSL_LIBRARY=$OPENSSL_DIR/lib/libssl.a \
-            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib-android-${{ matrix.abi }} \
-            -GNinja \
-            ..
-          
-          ninja
-          ninja install
-
-      - name: Create and build tdjni for Android
-        run: |
-          cd td
-          mkdir -p tdjni-build-${{ matrix.abi }}
-          
-          # Create completely new CMakeLists.txt for tdjni
-          cat > tdjni-build-${{ matrix.abi }}/CMakeLists.txt << 'CMAKEOF'
-          cmake_minimum_required(VERSION 3.4 FATAL_ERROR)
-          project(TdJni LANGUAGES CXX)
-          
-          set(CMAKE_CXX_STANDARD 17)
-          set(CMAKE_CXX_STANDARD_REQUIRED ON)
-          
-          # Get JNI include paths from environment
-          set(JNI_INCLUDE_DIR "$ENV{JAVA_HOME}/include")
-          set(JNI_INCLUDE_DIR2 "$ENV{JAVA_HOME}/include/linux")
-          
-          if(NOT EXISTS "${JNI_INCLUDE_DIR}/jni.h")
-            message(FATAL_ERROR "jni.h not found in ${JNI_INCLUDE_DIR}")
-          endif()
-          
-          # Find TDLib
-          find_package(Td REQUIRED)
-          
-          # Source file
-          set(TD_JNI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../example/java/td_jni.cpp")
-          
-          if(NOT EXISTS "${TD_JNI_SOURCE}")
-            message(FATAL_ERROR "td_jni.cpp not found at ${TD_JNI_SOURCE}")
-          endif()
-          
-          # Create shared library
-          add_library(tdjni SHARED ${TD_JNI_SOURCE})
-          
-          target_include_directories(tdjni PRIVATE
-            ${JNI_INCLUDE_DIR}
-            ${JNI_INCLUDE_DIR2}
-          )
-          
-          target_link_libraries(tdjni PRIVATE Td::TdJsonStatic)
-          
-          # For Android, strip the library
-          if(ANDROID)
-            add_custom_command(TARGET tdjni POST_BUILD
-              COMMAND ${CMAKE_STRIP} $<TARGET_FILE:tdjni>
-              COMMENT "Stripping libtdjni.so"
-            )
-          endif()
-          CMAKEOF
-          
-          cd tdjni-build-${{ matrix.abi }}
-          
-          cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-            -DANDROID_ABI=${{ matrix.abi }} \
-            -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
-            -DANDROID_STL=c++_static \
-            -DTd_DIR=${{ github.workspace }}/td/tdlib-android-${{ matrix.abi }}/lib/cmake/Td \
-            -GNinja \
-            .
-          
-          echo "=== CMake configuration complete ==="
-          
-          ninja
-          
-          echo "=== Build complete ==="
+          echo "=== Build complete, listing output ==="
           find . -name "*.so" -type f -ls
+          find ../.. -path "*/libs/*" -name "*.so" -type f -ls
 
       - name: Find and prepare artifacts
         run: |
-          mkdir -p artifacts/android/${{ matrix.abi }}
+          mkdir -p artifacts/android/armeabi-v7a
+          mkdir -p artifacts/android/arm64-v8a
+          mkdir -p artifacts/android/x86
+          mkdir -p artifacts/android/x86_64
           
-          SO_FILE=$(find td/tdjni-build-${{ matrix.abi }} -name "libtdjni.so" -type f 2>/dev/null | head -1)
+          # The script typically outputs to tdlib/libs/
+          TDLIB_LIBS="td/example/android/tdlib/libs"
           
-          if [ -n "$SO_FILE" ]; then
-            cp "$SO_FILE" artifacts/android/${{ matrix.abi }}/
+          if [ -d "$TDLIB_LIBS" ]; then
+            echo "=== Found libs in $TDLIB_LIBS ==="
+            find "$TDLIB_LIBS" -name "*.so" -type f -ls
             
-            echo "=== File info ==="
-            file "$SO_FILE"
-            ls -lh "$SO_FILE"
+            # Copy libraries
+            [ -f "$TDLIB_LIBS/armeabi-v7a/libtdjni.so" ] && cp "$TDLIB_LIBS/armeabi-v7a/libtdjni.so" artifacts/android/armeabi-v7a/
+            [ -f "$TDLIB_LIBS/arm64-v8a/libtdjni.so" ] && cp "$TDLIB_LIBS/arm64-v8a/libtdjni.so" artifacts/android/arm64-v8a/
+            [ -f "$TDLIB_LIBS/x86/libtdjni.so" ] && cp "$TDLIB_LIBS/x86/libtdjni.so" artifacts/android/x86/
+            [ -f "$TDLIB_LIBS/x86_64/libtdjni.so" ] && cp "$TDLIB_LIBS/x86_64/libtdjni.so" artifacts/android/x86_64/
           else
-            echo "libtdjni.so not found!"
-            echo "=== All .so files ==="
-            find td -name "*.so" -type f
-            exit 1
+            echo "=== Searching for .so files ==="
+            find td -name "libtdjni.so" -type f -ls
+            
+            # Try alternative locations
+            for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+              SO_FILE=$(find td -path "*/$abi/*" -name "libtdjni.so" -type f 2>/dev/null | head -1)
+              if [ -n "$SO_FILE" ]; then
+                cp "$SO_FILE" "artifacts/android/$abi/"
+                echo "Copied $SO_FILE to artifacts/android/$abi/"
+              fi
+            done
           fi
+          
+          echo "=== Final artifacts ==="
+          find artifacts -name "*.so" -type f -ls
 
-      - name: Upload Android artifact
+      - name: Upload Android armeabi-v7a artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tdlib-jni-android-${{ matrix.abi }}-${{ needs.get-tdlib-version.outputs.commit_short }}
-          path: artifacts/android/${{ matrix.abi }}/libtdjni.so
+          name: tdlib-jni-android-armeabi-v7a-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/android/armeabi-v7a/libtdjni.so
+          if-no-files-found: warn
+
+      - name: Upload Android arm64-v8a artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-jni-android-arm64-v8a-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/android/arm64-v8a/libtdjni.so
+          if-no-files-found: warn
+
+      - name: Upload Android x86 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-jni-android-x86-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/android/x86/libtdjni.so
+          if-no-files-found: warn
+
+      - name: Upload Android x86_64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-jni-android-x86_64-${{ needs.get-tdlib-version.outputs.commit_short }}
+          path: artifacts/android/x86_64/libtdjni.so
+          if-no-files-found: warn
 
   # ============================================
   # Build Javadoc Documentation
