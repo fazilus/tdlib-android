@@ -354,12 +354,20 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android NDK and CMake
+      - name: List available NDK versions
         run: |
-          sdkmanager --install "ndk;26.3.11295956" "cmake;3.22.1"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11295956" >> $GITHUB_ENV
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.3.11295956" >> $GITHUB_ENV
-          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.3.11295956" >> $GITHUB_ENV
+          echo "=== Available NDK versions ==="
+          sdkmanager --list 2>/dev/null | grep ndk || true
+
+      - name: Install Android NDK
+        run: |
+          # Install NDK version that is known to work
+          sdkmanager --install "ndk;26.1.10909125"
+          
+          # Set environment variables
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/26.1.10909125" >> $GITHUB_ENV
 
       - name: Clone TDLib
         run: |
@@ -367,23 +375,28 @@ jobs:
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
 
+      - name: Check build script
+        run: |
+          cd td/example/android
+          echo "=== Directory contents ==="
+          ls -la
+          echo ""
+          echo "=== build-tdlib.sh content ==="
+          cat build-tdlib.sh
+
       - name: Build TDLib for Android using official script
         run: |
           cd td/example/android
-          
-          # Show script content for debugging
-          echo "=== build-tdlib.sh content ==="
-          head -100 build-tdlib.sh
           
           # Make script executable
           chmod +x build-tdlib.sh
           
           # Run the official build script
           ./build-tdlib.sh
-          
-          echo "=== Build complete, listing output ==="
-          find . -name "*.so" -type f -ls
-          find ../.. -path "*/libs/*" -name "*.so" -type f -ls
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          ANDROID_NDK: ${{ env.ANDROID_NDK }}
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_ROOT }}
 
       - name: Find and prepare artifacts
         run: |
@@ -392,34 +405,35 @@ jobs:
           mkdir -p artifacts/android/x86
           mkdir -p artifacts/android/x86_64
           
-          # The script typically outputs to tdlib/libs/
+          echo "=== Searching for .so files ==="
+          find td -name "libtdjni.so" -type f -ls
+          
+          # Try standard location first
           TDLIB_LIBS="td/example/android/tdlib/libs"
           
           if [ -d "$TDLIB_LIBS" ]; then
             echo "=== Found libs in $TDLIB_LIBS ==="
             find "$TDLIB_LIBS" -name "*.so" -type f -ls
             
-            # Copy libraries
             [ -f "$TDLIB_LIBS/armeabi-v7a/libtdjni.so" ] && cp "$TDLIB_LIBS/armeabi-v7a/libtdjni.so" artifacts/android/armeabi-v7a/
             [ -f "$TDLIB_LIBS/arm64-v8a/libtdjni.so" ] && cp "$TDLIB_LIBS/arm64-v8a/libtdjni.so" artifacts/android/arm64-v8a/
             [ -f "$TDLIB_LIBS/x86/libtdjni.so" ] && cp "$TDLIB_LIBS/x86/libtdjni.so" artifacts/android/x86/
             [ -f "$TDLIB_LIBS/x86_64/libtdjni.so" ] && cp "$TDLIB_LIBS/x86_64/libtdjni.so" artifacts/android/x86_64/
-          else
-            echo "=== Searching for .so files ==="
-            find td -name "libtdjni.so" -type f -ls
-            
-            # Try alternative locations
-            for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+          fi
+          
+          # Also check alternative locations
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            if [ ! -f "artifacts/android/$abi/libtdjni.so" ]; then
               SO_FILE=$(find td -path "*/$abi/*" -name "libtdjni.so" -type f 2>/dev/null | head -1)
               if [ -n "$SO_FILE" ]; then
                 cp "$SO_FILE" "artifacts/android/$abi/"
                 echo "Copied $SO_FILE to artifacts/android/$abi/"
               fi
-            done
-          fi
+            fi
+          done
           
           echo "=== Final artifacts ==="
-          find artifacts -name "*.so" -type f -ls
+          find artifacts -type f -ls
 
       - name: Upload Android armeabi-v7a artifact
         uses: actions/upload-artifact@v4
