@@ -381,7 +381,7 @@ jobs:
           cd td
           git checkout ${{ needs.get-tdlib-version.outputs.commit_sha }}
 
-      - name: Build native generators (host build)
+      - name: Build native TDLib (for code generation)
         run: |
           cd td
           mkdir -p build-native
@@ -389,6 +389,7 @@ jobs:
           
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
+            -DTD_ENABLE_JNI=ON \
             ..
           
           cmake --build . --target prepare_cross_compiling --parallel $(nproc)
@@ -431,6 +432,8 @@ jobs:
           
           OPENSSL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
           
+          # Configure TDLib with JNI for Android
+          # Key: pass JAVA_INCLUDE_PATH and JAVA_INCLUDE_PATH2 to bypass JVM requirement
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -438,57 +441,82 @@ jobs:
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
             -DTD_ENABLE_JNI=ON \
+            -DJAVA_INCLUDE_PATH=$JAVA_HOME/include \
+            -DJAVA_INCLUDE_PATH2=$JAVA_HOME/include/linux \
+            -DJAVA_AWT_LIBRARY=NotNeeded \
+            -DJAVA_JVM_LIBRARY=NotNeeded \
+            -DJAVA_AWT_INCLUDE_PATH=$JAVA_HOME/include \
             -DOPENSSL_ROOT_DIR=$OPENSSL_DIR \
             -DOPENSSL_INCLUDE_DIR=$OPENSSL_DIR/include \
             -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_DIR/lib/libcrypto.a \
             -DOPENSSL_SSL_LIBRARY=$OPENSSL_DIR/lib/libssl.a \
-            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib-install \
+            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib-android-${{ matrix.abi }} \
             -GNinja \
             ..
           
-          # Build all targets
+          # Build all
           ninja
           
           # Install
           ninja install
-          
-          echo "=== Available targets ==="
-          ninja -t targets | head -50
-          
-          echo "=== Built .so files ==="
-          find . -name "*.so" -type f
 
-      - name: Create tdjni wrapper
+      - name: Build tdjni for Android
         run: |
-          cd td
+          cd td/example/java
           
-          # Create a simple CMakeLists.txt for tdjni
-          mkdir -p jni-build-${{ matrix.abi }}
+          # Patch CMakeLists.txt to skip javadoc and fix JNI for Android
+          python3 << 'EOF'
+          import re
           
-          cat > jni-build-${{ matrix.abi }}/CMakeLists.txt << 'CMAKEFILE'
-          cmake_minimum_required(VERSION 3.4 FATAL_ERROR)
-          project(TdJni LANGUAGES CXX)
-
-          set(CMAKE_CXX_STANDARD 17)
-          set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-          # JNI include directories
-          set(JAVA_HOME "$ENV{JAVA_HOME}")
-          set(JNI_INCLUDE_DIRS "${JAVA_HOME}/include" "${JAVA_HOME}/include/linux")
-
-          # Find installed TDLib
-          find_package(Td REQUIRED)
-
-          # Get td_jni.cpp from example/java
-          set(TD_JNI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../example/java/td_jni.cpp")
-
-          # Build shared library
-          add_library(tdjni SHARED ${TD_JNI_SOURCE})
-          target_include_directories(tdjni PRIVATE ${JNI_INCLUDE_DIRS})
-          target_link_libraries(tdjni PRIVATE Td::TdJsonStatic)
-          CMAKEFILE
-
-          cd jni-build-${{ matrix.abi }}
+          with open('CMakeLists.txt', 'r') as f:
+              content = f.read()
+          
+          # Remove javadoc dependencies
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+build_java\s+generate_javadoc\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api\s+generate_javadoc\s+build_java\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          content = re.sub(
+              r'add_dependencies\(tdjni\s+td_generate_java_api[^)]*build_java[^)]*\)',
+              'add_dependencies(tdjni td_generate_java_api)',
+              content
+          )
+          
+          # Replace find_package(JNI REQUIRED) with manual JNI setup
+          jni_replacement = '''# JNI setup
+          if(ANDROID)
+            # For Android, we only need JNI headers
+            set(JAVA_INCLUDE_PATH "$ENV{JAVA_HOME}/include")
+            set(JAVA_INCLUDE_PATH2 "$ENV{JAVA_HOME}/include/linux")
+            set(JNI_INCLUDE_DIRS "${JAVA_INCLUDE_PATH}" "${JAVA_INCLUDE_PATH2}")
+            set(JNI_LIBRARIES "")
+            set(JNI_FOUND TRUE)
+          else()
+            find_package(JNI REQUIRED)
+          endif()'''
+          
+          content = re.sub(
+              r'find_package\s*\(\s*JNI\s+REQUIRED\s*\)',
+              jni_replacement,
+              content
+          )
+          
+          with open('CMakeLists.txt', 'w') as f:
+              f.write(content)
+          
+          print("Patched CMakeLists.txt")
+          EOF
+          
+          cat CMakeLists.txt
+          
+          mkdir -p build-android-${{ matrix.abi }}
+          cd build-android-${{ matrix.abi }}
           
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
@@ -496,21 +524,17 @@ jobs:
             -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
-            -DTd_DIR=${{ github.workspace }}/td/tdlib-install/lib/cmake/Td \
+            -DTd_DIR=${{ github.workspace }}/td/tdlib-android-${{ matrix.abi }}/lib/cmake/Td \
             -GNinja \
-            .
+            ..
           
-          ninja
-          
-          echo "=== Built files ==="
-          find . -name "*.so" -type f -ls
+          ninja tdjni
 
       - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/android/${{ matrix.abi }}
           
-          # Look for libtdjni.so
-          SO_FILE=$(find td/jni-build-${{ matrix.abi }} -name "libtdjni.so" -type f 2>/dev/null | head -1)
+          SO_FILE=$(find td/example/java/build-android-${{ matrix.abi }} -name "libtdjni.so" -type f 2>/dev/null | head -1)
           
           if [ -n "$SO_FILE" ]; then
             cp "$SO_FILE" artifacts/android/${{ matrix.abi }}/
