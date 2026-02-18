@@ -423,7 +423,7 @@ jobs:
           make -j $(nproc)
           make install_sw
 
-      - name: Build TDLib with tdjni for Android
+      - name: Build TDLib for Android
         run: |
           cd td
           mkdir -p build-android-${{ matrix.abi }}
@@ -431,7 +431,6 @@ jobs:
           
           OPENSSL_DIR=${{ github.workspace }}/openssl-android/${{ matrix.abi }}
           
-          # Configure with JNI enabled
           cmake \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -439,26 +438,79 @@ jobs:
             -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
             -DANDROID_STL=c++_static \
             -DTD_ENABLE_JNI=ON \
-            -DJAVA_HOME=$JAVA_HOME \
             -DOPENSSL_ROOT_DIR=$OPENSSL_DIR \
             -DOPENSSL_INCLUDE_DIR=$OPENSSL_DIR/include \
             -DOPENSSL_CRYPTO_LIBRARY=$OPENSSL_DIR/lib/libcrypto.a \
             -DOPENSSL_SSL_LIBRARY=$OPENSSL_DIR/lib/libssl.a \
+            -DCMAKE_INSTALL_PREFIX:PATH=../tdlib-install \
             -GNinja \
             ..
           
-          # Build tdjni target directly (it's part of main TDLib build)
-          ninja tdjni
+          # Build all targets
+          ninja
+          
+          # Install
+          ninja install
+          
+          echo "=== Available targets ==="
+          ninja -t targets | head -50
+          
+          echo "=== Built .so files ==="
+          find . -name "*.so" -type f
+
+      - name: Create tdjni wrapper
+        run: |
+          cd td
+          
+          # Create a simple CMakeLists.txt for tdjni
+          mkdir -p jni-build-${{ matrix.abi }}
+          
+          cat > jni-build-${{ matrix.abi }}/CMakeLists.txt << 'CMAKEFILE'
+          cmake_minimum_required(VERSION 3.4 FATAL_ERROR)
+          project(TdJni LANGUAGES CXX)
+
+          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+          # JNI include directories
+          set(JAVA_HOME "$ENV{JAVA_HOME}")
+          set(JNI_INCLUDE_DIRS "${JAVA_HOME}/include" "${JAVA_HOME}/include/linux")
+
+          # Find installed TDLib
+          find_package(Td REQUIRED)
+
+          # Get td_jni.cpp from example/java
+          set(TD_JNI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../example/java/td_jni.cpp")
+
+          # Build shared library
+          add_library(tdjni SHARED ${TD_JNI_SOURCE})
+          target_include_directories(tdjni PRIVATE ${JNI_INCLUDE_DIRS})
+          target_link_libraries(tdjni PRIVATE Td::TdJsonStatic)
+          CMAKEFILE
+
+          cd jni-build-${{ matrix.abi }}
+          
+          cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-${{ matrix.api_level }} \
+            -DANDROID_STL=c++_static \
+            -DTd_DIR=${{ github.workspace }}/td/tdlib-install/lib/cmake/Td \
+            -GNinja \
+            .
+          
+          ninja
           
           echo "=== Built files ==="
-          find . -name "*.so" -type f
+          find . -name "*.so" -type f -ls
 
       - name: Find and prepare artifacts
         run: |
           mkdir -p artifacts/android/${{ matrix.abi }}
           
-          # Look for libtdjni.so in build directory
-          SO_FILE=$(find td/build-android-${{ matrix.abi }} -name "libtdjni.so" -type f 2>/dev/null | head -1)
+          # Look for libtdjni.so
+          SO_FILE=$(find td/jni-build-${{ matrix.abi }} -name "libtdjni.so" -type f 2>/dev/null | head -1)
           
           if [ -n "$SO_FILE" ]; then
             cp "$SO_FILE" artifacts/android/${{ matrix.abi }}/
@@ -467,8 +519,8 @@ jobs:
             file "$SO_FILE"
             ls -lh "$SO_FILE"
           else
-            echo "libtdjni.so not found in build directory!"
-            echo "=== Searching for all .so files ==="
+            echo "libtdjni.so not found!"
+            echo "=== All .so files ==="
             find td -name "*.so" -type f
             exit 1
           fi
