@@ -1,3 +1,10 @@
+> [!WARNING]
+>
+> ### Project Archived
+> There will be no further updates or releases. The repository will remain available in its current state for reference purposes only. \
+> If needed, you can still build the library yourself by following the instructions in [BUILD.MD](https://github.com/fazilus/tdlib-android/blob/main/BUILD.MD)
+
+
 # TDLib for Android
 
 [![](https://jitpack.io/v/fazilus/tdlib-android.svg)](https://jitpack.io/#fazilus/tdlib-android)
@@ -12,9 +19,7 @@
 
 Why do you need this library if you can build TDLib yourself? The answer is quite simple:
 - **Ready to use** — no need to spend time building from source;
-- **Identical functionality** — fully compliant with official TDLib;
-- **Easy updates** — this library will be updated with important TDLib updates, you just need to update the library instead of building it yourself every time
-- **Perfect for Android Studio** — IDE will no longer mark all accesses to TDLib as "errors", because now it sees its code.
+- **Identical functionality** — fully compliant with official TDLib.
 
 If you are still interested in building the library from scratch, refer to these guides:\
 [Official build instructions](https://github.com/tdlib/td/tree/master/example/android) or [My more detailed build instructions](https://github.com/fazilus/tdlib-android/blob/main/BUILD.MD) 
